@@ -53,6 +53,7 @@ $AnyEvent::Log::FILTER->level("trace");
 
 my @data_set = (
     ['GET', 'http://www.google.be/', undef, {}],
+    #['GET', 'http://www.google.be/', undef, {}],
     #['PUT', '/abc', (scalar(do {local $/; my $fh; open($fh, '<', $ARGV[0]) and <$fh>} x 1), {}]) x 100,
     #['PUT', '/def', encode_json([{abctest => 1}]), {}],
 );
@@ -121,9 +122,11 @@ use AnyEvent::Log;
 
 sub new {
     my ($class, $state) = @_;
-    $state->{-engine}{next_cb} = \&send_request;
-    $state->{-engine}{request_cb} = \&read_request_status;
+
+    # get an entry
     schedule_next($state);
+
+    # make the handle
     my $hdl = new AnyEvent::Handle(
         connect => [$state->{-engine}{request_host}, $state->{-engine}{request_port}],
         on_connect => sub {
@@ -141,7 +144,6 @@ sub new {
         $hdl->destroy();
         $state->{cv}->send();
     };
-
     $hdl->on_error(sub {
         my ($hdl, $fatal, $msg) = @_;
         AE::log error => $msg;
@@ -187,7 +189,10 @@ sub schedule_next {
         return 0;
     }
 
-    my $state_data = $state->{-engine};
+    my $state_data = $state->{-engine} = {};
+
+    $state_data->{request_cb} = \&read_request_status;
+    $state_data->{next_cb}    = \&send_request;
 
     $state_data->{request_method}  = $method;
     $state_data->{request_data}    = $body // '';
@@ -195,8 +200,7 @@ sub schedule_next {
     $state_data->{request_host}    = $host;
     $state_data->{request_port}    = $port;
     $state_data->{request_path}    = $path;
-    $state_data->{next_cb} = \&send_request;
-
+    AE::log debug => "schedule_next: $method $host $path";
     return 1;
 }
 
@@ -211,6 +215,7 @@ sub send_request {
          . join('', map "\u$_: $hdr{$_}\r\n", grep defined $hdr{$_}, keys %hdr)
          . "\r\n";
     #print "HEADERS>>$buf<<\n";
+    AE::log debug => "send_request: $buf";
     $state->{hdl}->push_write($buf);
     return 0;
 }
@@ -273,8 +278,8 @@ sub body_reader {
             length($state_data->{current_data_body}),
             ''
         );
-        &{$state->{consumer}}($state_data->{current_data_body});
-        $state->{-engine}{next_cb} = \&schedule_next;
+        &{$state->{consumer}}(delete $state_data->{current_data_body});
+        _init($state);
         return length($hdl->rbuf);
     }
     return 0;
@@ -311,11 +316,21 @@ sub chunked_body_reader {
             $state_data->{chunk_wanted_size} = $size;
             $state_data->{request_cb} = \&chunk_reader;
         } else {
-            &{$state->{consumer}}($state_data->{current_data_body});
-            $state->{-engine}{next_cb} = \&schedule_next;
+            &{$state->{consumer}}(delete $state_data->{current_data_body});
+            _init($state);
         }
         return length($hdl->rbuf);
     }
     return 0;
+}
+
+sub _init {
+    my ($state) = @_;
+    my $hdl = $state->{hdl};
+    schedule_next($state);
+    $hdl->on_drain(sub {
+        my ($hdl) = @_;
+        &{$state->{-engine}{next_cb}}($state);
+    });
 }
 
