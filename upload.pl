@@ -3,23 +3,11 @@ use strict; use warnings;
 
 use Data::Dumper;
 use Getopt::Long;
-use AnyEvent;
-use AnyEvent::HTTP;
-use EV;
 use MIME::Base64 qw(encode_base64);
-use URI;
-use Errno;
-use AnyEvent::Socket;
-use AnyEvent::Handle;
-use AnyEvent::Log;
-use IO::Socket::SSL;
-use IO::Socket::INET;
-use JSON;
-use Compress::Zlib;
-use Compress::Bzip2;
-#$AnyEvent::Log::FILTER->level("trace");
 
-use Benchmark;
+use AE;
+use EV;
+use AnyEvent::Log;
 
 
 GetOptions(
@@ -59,50 +47,177 @@ my $ua = {
     timeout    => $opts->{timeout}     // 300,
 };
 
+AnyEvent::Log::ctx->level("info");
+$AnyEvent::Log::FILTER->level("trace");
 
-sub send_data {
-    my ($state, $hdl) = @_;
-    my $str = substr($state->{-engine}{current_data}, 0, 10_000_000, '');
-    unless (length($str)){
-        $state->{-engine}{next_cb} = \&send_request;
-        $hdl->on_drain(undef);
-        return '';
+
+my @data_set = (
+    ['GET', 'http://www.google.be/', undef, {}],
+    #['PUT', '/abc', (scalar(do {local $/; my $fh; open($fh, '<', $ARGV[0]) and <$fh>} x 1), {}]) x 100,
+    #['PUT', '/def', encode_json([{abctest => 1}]), {}],
+);
+
+my $data_sent = 0;
+my $orig_set_size = scalar(@data_set);
+my @handles;
+#while(@data_set){
+    my $cv = \AE::cv();
+    while(scalar(@handles) < 1 and @data_set){
+        AE::log info => "NEW:".scalar(@handles);
+        my $hdl = AE::HTTP->new({
+            # producer
+            producer => sub {
+                AE::log info => "SEND:".scalar(@data_set);
+                my $r = shift @data_set;
+                AE::log info => "SEND:".Dumper($r);
+                return $r;
+            },
+            # consumer
+            consumer => sub {
+                my ($response) = @_;
+                AE::log info => "RESPONSE:".scalar(@data_set);
+                $data_sent++;
+                AE::log info => "OK:$data_sent, $orig_set_size, responsebody:$response";
+                print $response;
+                #push @data_set, ['GET', 'http://www.google.be/', undef, {}];
+                if(scalar(@data_set) == 0 and $data_sent == $orig_set_size){
+                    AE::log info => "END OK:$data_sent, $orig_set_size, ".scalar(@data_set);
+                    ${$cv}->send();
+                }
+            },
+            # error: put back in queue
+            error_handler => sub {
+                unshift @data_set, $_[0];
+            },
+            # condvar
+            cv => $cv
+        });
+        push @handles, $hdl;
     }
-    return $str;
+    AE::log info => "WAIT:".scalar(@handles);
+    $$cv->recv();
+    @handles = grep {!$_->{hdl}->destroyed()} @handles;
+    AE::log info => "LOOP:".scalar(@handles);
+
+#}
+AE::log info => "LOOP END:".scalar(@handles);
+
+package AE::HTTP;
+
+use strict; use warnings;
+
+use URI;
+use Errno;
+use IO::Socket::SSL;
+use Compress::Zlib;
+use Data::Dumper;
+
+use AnyEvent::Socket;
+use AnyEvent::Handle;
+use AnyEvent::Log;
+
+
+
+
+sub new {
+    my ($class, $state) = @_;
+    $state->{-engine}{next_cb} = \&send_request;
+    $state->{-engine}{request_cb} = \&read_request_status;
+    schedule_next($state);
+    my $hdl = new AnyEvent::Handle(
+        connect => [$state->{-engine}{request_host}, $state->{-engine}{request_port}],
+        on_connect => sub {
+            my ($hdl, $host, $port, undef) = @_;
+            AE::log info => "CONNECT:$hdl->{peername},$host:$port";
+        }
+    );
+    $state->{hdl} = $hdl;
+    $hdl->on_read(sub {
+        my ($hdl) = @_;
+        &{$state->{-engine}{request_cb}}($state);
+    });
+    my $disconnect = sub {
+        my ($hdl, $fatal, $msg) = @_;
+        $hdl->destroy();
+        $state->{cv}->send();
+    };
+
+    $hdl->on_error(sub {
+        my ($hdl, $fatal, $msg) = @_;
+        AE::log error => $msg;
+        &$disconnect(@_);
+    });
+    $hdl->on_eof($disconnect);
+    $hdl->on_drain(sub {
+        my ($hdl) = @_;
+        &{$state->{-engine}{next_cb}}($state);
+    });
+
+    return bless $state, ref($class)||$class;
 }
 
-sub send_request {
-    my ($state, $hdl) = @_;
-    my $data = &{$state->{producer}}($hdl);
-    unless(defined $data){
-        $hdl->on_drain(undef);
-        return '';
+sub send_data {
+    my ($state) = @_;
+    my $str = substr($state->{-engine}{request_data}, 0, 10_000_000, '');
+    unless (length($str)){
+        $state->{-engine}{next_cb} = \&schedule_next;
+        $state->{hdl}->on_drain(undef);
+        return 0;
     }
+    return 1;
+}
 
-    my $uriref = $data->[1];
-    #my $params = {};
-    #my $cstr = "$opts->{proto}://$opts->{server}:$opts->{port}/$uriref";
-    #my $uri = URI->new($cstr);
+sub get_next {
+    my ($state) = @_;
+    my $data = &{$state->{producer}}();
+    unless(defined $data){
+        return;
+    }
+    my $uri = URI->new($data->[1]);
+    AE::log info => "$data->[0] ".$uri->as_string();
     #$uri->query_form(map {$_, $params->{$_}} grep {defined $params->{$_}} keys %{$params});
+    return $data->[0], $data->[2], $uri->host(), $uri->port(), $uri->as_string(), $data->[3];
+}
+
+sub schedule_next {
+    my ($state) = @_;
+    my ($method, $body, $host, $port, $path, $headers) = get_next($state);
+    unless($method){
+        ${$state->{cv}}->send();
+        return 0;
+    }
 
     my $state_data = $state->{-engine};
 
-    my %hdr = (%{$ua->{headers}}, %{$data->[3]//{}});
-    $state_data->{orig_sent_data} = $data;
-    #$data = Compress::Zlib::memGzip($data);
-    $state_data->{current_data} = $data->[2] // '';
+    $state_data->{request_method}  = $method;
+    $state_data->{request_data}    = $body // '';
+    $state_data->{request_headers} = $headers;
+    $state_data->{request_host}    = $host;
+    $state_data->{request_port}    = $port;
+    $state_data->{request_path}    = $path;
+    $state_data->{next_cb} = \&send_request;
+
+    return 1;
+}
+
+sub send_request {
+    my ($state) = @_;
+    my $state_data = $state->{-engine};
     $state_data->{next_cb} = \&send_data;
-    $hdr{'content-length'} = length($state_data->{current_data});
-    my $buf = "$data->[0] $uriref HTTP/1.1\r\n"
+
+    my %hdr = (%{$ua->{headers}}, %{$state_data->{request_headers}//{}});
+    $hdr{'content-length'} = length($state_data->{request_data});
+    my $buf = "$state_data->{request_method} $state_data->{request_path} HTTP/1.1\r\n"
          . join('', map "\u$_: $hdr{$_}\r\n", grep defined $hdr{$_}, keys %hdr)
          . "\r\n";
     #print "HEADERS>>$buf<<\n";
-    return $buf;
+    $state->{hdl}->push_write($buf);
+    return 0;
 }
 
 sub read_request_status {
-    my ($state, $hdl) = @_;
-    if ($hdl->rbuf =~ s/^HTTP\/1\.1 (\d+) (.*?)\r\n//){
+    my ($state) = @_;
+    if ($state->{hdl}->rbuf =~ s/^HTTP\/1\.1 (\d+) (.*?)\r\n//){
         my ($code, $msg) = ($1, $2);
         AE::log info => "RESPONSE OK:$code, $msg";
         $state->{-engine}{request_cb} = \&read_response_headers;
@@ -112,7 +227,8 @@ sub read_request_status {
 }
 
 sub read_response_headers {
-    my ($state, $hdl) = @_;
+    my ($state) = @_;
+    my $hdl = $state->{hdl};
     #print '>>'.$hdl->rbuf.'<<'."\n";
     if ($hdl->rbuf =~ s/^(.*?)\r\n//){
         my $line = $1;
@@ -145,7 +261,8 @@ sub read_response_headers {
 }
 
 sub body_reader {
-    my ($state, $hdl) = @_;
+    my ($state) = @_;
+    my $hdl = $state->{hdl};
     #print '>>'.$hdl->rbuf.'<<'."\n";
     my $state_data = $state->{-engine};
     $state_data->{current_data_body} .= delete $hdl->{rbuf};
@@ -156,15 +273,16 @@ sub body_reader {
             length($state_data->{current_data_body}),
             ''
         );
-        &{$state->{consumer}}($hdl, $state_data->{current_data_body});
-        init_state($hdl, $state);
+        &{$state->{consumer}}($state_data->{current_data_body});
+        $state->{-engine}{next_cb} = \&schedule_next;
         return length($hdl->rbuf);
     }
     return 0;
 }
 
 sub chunk_reader {
-    my ($state, $hdl) = @_;
+    my ($state) = @_;
+    my $hdl = $state->{hdl};
     my $state_data = $state->{-engine};
     AE::log debug => "CHUNK>>$state_data->{chunk_wanted_size}>>".$hdl->rbuf;
     my $size_todo = $state_data->{chunk_wanted_size} - length($state_data->{current_chunk}//'');
@@ -179,7 +297,8 @@ sub chunk_reader {
 }
 
 sub chunked_body_reader {
-    my ($state, $hdl) = @_;
+    my ($state) = @_;
+    my $hdl = $state->{hdl};
     AE::log debug => "CHUNKBODYREADER>>".$hdl->rbuf;
     if($hdl->rbuf =~ s/^\r\n//){
         return length($hdl->rbuf);
@@ -192,120 +311,11 @@ sub chunked_body_reader {
             $state_data->{chunk_wanted_size} = $size;
             $state_data->{request_cb} = \&chunk_reader;
         } else {
-            &{$state->{consumer}}($hdl, $state_data->{current_data_body});
-            init_state($hdl, $state);
+            &{$state->{consumer}}($state_data->{current_data_body});
+            $state->{-engine}{next_cb} = \&schedule_next;
         }
         return length($hdl->rbuf);
     }
     return 0;
 }
 
-sub init_state {
-    my ($hdl, $state) = @_;
-    $state->{-engine} = { 
-        next_cb    => \&send_request,
-        request_cb => \&read_request_status,
-    };
-    $hdl->on_read(sub {
-        my ($hdl) = @_;
-        while($state->{-engine}{request_cb}($state, $hdl)){
-            # might consume cpu cycles while exit is wanted and such
-            #print STDERR "NOK\n";
-        }
-    });
-    $hdl->on_drain(sub {
-        my ($hdl) = @_;
-        my $str = $state->{-engine}{next_cb}($state, $hdl);
-        #print "WRITER>>".$str."<<\n";
-        $hdl->push_write($str) if length($str);
-    });
-
-    my $disconnect = sub {
-        my ($hdl, $fatal, $msg) = @_;
-        &{$state->{error_handler}}($state->{-engine}{orig_sent_data});
-        $hdl->destroy();
-        $state->{cv}->send();
-    };
-
-    $hdl->on_error(sub {
-        my ($hdl, $fatal, $msg) = @_;
-        AE::log error => $msg;
-        &$disconnect(@_);
-    });
-    $hdl->on_eof($disconnect);
-    return $state;
-}
-
-sub new_handle {
-    my (%args) = @_;
-
-##    my $dest = "$opts->{server}:$opts->{port}";
-##    my $sock = IO::Socket::INET->new(
-##        PeerAddr        => $dest,
-##        Proto           => 'tcp'
-##    ) or die "connect error $dest: $@\n";
-##    $sock->blocking(0);
-    #$sock->setsockopt(SOL_SOCKET, SO_SNDBUF, $self->{sndbuf}) if $self->{sndbuf};
-    my $hdl = new AnyEvent::Handle(
-        connect => [$opts->{server}, $opts->{port}],
-        on_connect => sub {
-            my ($hdl, $host, $port, undef) = @_;
-            AE::log info => "CONNECT:$hdl->{peername},$host:$port";
-        }
-    );
-    init_state($hdl, \%args);
-    return $hdl;
-}
-
-my @data_set = (
-    ['GET', 'http://www.google.be/', undef, {}],
-    #['PUT', '/abc', (scalar(do {local $/; my $fh; open($fh, '<', $ARGV[0]) and <$fh>} x 1), {}]) x 100,
-    #['PUT', '/def', encode_json([{abctest => 1}]), {}],
-);
-
-my $data_sent = 0;
-my $orig_set_size = scalar(@data_set);
-my @handles;
-#while(@data_set){
-    my $cv = \AE::cv();
-    while(scalar(@handles) < 1 and @data_set){
-        AE::log info => "NEW:".scalar(@handles);
-        my $hdl = new_handle(
-            # producer
-            producer => sub {
-                my ($hdl) = @_;
-                AE::log info => "SEND:".scalar(@data_set).','.$hdl->{peername};
-                shift @data_set
-            },
-            # consumer
-            consumer => sub {
-                my ($hdl, $response) = @_;
-                AE::log info => "RESPONSE:".scalar(@data_set).','.$hdl->{peername};
-                $data_sent++;
-                AE::log info => "OK:$data_sent, $orig_set_size, responsebody:$response";
-                print $response;
-                #push @data_set, ['GET', 'http://www.google.be/', undef, {}];
-                if(scalar(@data_set) == 0 and $data_sent == $orig_set_size){
-                    AE::log info => "END OK:$data_sent, $orig_set_size, ".scalar(@data_set);
-                    ${$cv}->send();
-                }
-            },
-            consumer_iterator => sub {
-                my ($hdl, $chunk, $finalized) = @_;
-            },
-            # error: put back in queue
-            error_handler => sub {
-                unshift @data_set, $_[0];
-            },
-            # condvar
-            cv => $cv
-        );
-        push @handles, $hdl;
-    }
-    AE::log info => "WAIT:".scalar(@handles);
-    $$cv->recv();
-    @handles = grep {!$_->destroyed()} @handles;
-    AE::log info => "LOOP:".scalar(@handles);
-
-#}
-AE::log info => "LOOP END:".scalar(@handles);
