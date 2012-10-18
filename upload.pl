@@ -53,7 +53,7 @@ $AnyEvent::Log::FILTER->level("trace");
 
 my @data_set = (
     ['GET', 'http://www.google.be/', undef, {}],
-    ['GET', 'http://www.google.be/', undef, {}],
+    #['GET', 'http://www.google.be/', undef, {}],
     #['PUT', '/abc', (scalar(do {local $/; my $fh; open($fh, '<', $ARGV[0]) and <$fh>} x 1), {}]) x 100,
     #['PUT', '/def', encode_json([{abctest => 1}]), {}],
 );
@@ -143,7 +143,7 @@ sub new {
     my $disconnect = sub {
         my ($hdl, $fatal, $msg) = @_;
         $hdl->destroy();
-        $state->{cv}->send();
+        ${$state->{cv}}->send();
     };
     $hdl->on_error(sub {
         my ($hdl, $fatal, $msg) = @_;
