@@ -53,7 +53,7 @@ $AnyEvent::Log::FILTER->level("trace");
 
 my @data_set = (
     ['GET', 'http://www.google.be/', undef, {}],
-    #['GET', 'http://www.google.be/', undef, {}],
+    ['GET', 'http://www.google.be/', undef, {}],
     #['PUT', '/abc', (scalar(do {local $/; my $fh; open($fh, '<', $ARGV[0]) and <$fh>} x 1), {}]) x 100,
     #['PUT', '/def', encode_json([{abctest => 1}]), {}],
 );
@@ -137,6 +137,7 @@ sub new {
     $state->{hdl} = $hdl;
     $hdl->on_read(sub {
         my ($hdl) = @_;
+        AE::log debug => "on_read() called";
         &{$state->{-engine}{request_cb}}($state);
     });
     my $disconnect = sub {
@@ -222,6 +223,8 @@ sub send_request {
 
 sub read_request_status {
     my ($state) = @_;
+    AE::log debug => "read_request_status:".$state->{hdl}->rbuf;
+    $state->{hdl}->rbuf =~ s/^\r\n//;
     if ($state->{hdl}->rbuf =~ s/^HTTP\/1\.1 (\d+) (.*?)\r\n//){
         my ($code, $msg) = ($1, $2);
         AE::log info => "RESPONSE OK:$code, $msg";
@@ -330,6 +333,7 @@ sub _init {
     schedule_next($state);
     $hdl->on_drain(sub {
         my ($hdl) = @_;
+        AE::log debug => "_init(): called next_cb";
         &{$state->{-engine}{next_cb}}($state);
     });
 }
