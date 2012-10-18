@@ -53,7 +53,8 @@ $AnyEvent::Log::FILTER->level("trace");
 
 my @data_set = (
     ['GET', 'http://www.google.be/', undef, {}],
-    #['GET', 'http://www.google.be/', undef, {}],
+    ['GET', 'http://www.google.be/', undef, {}],
+    ['GET', 'http://www.google.be/', undef, {}],
     #['PUT', '/abc', (scalar(do {local $/; my $fh; open($fh, '<', $ARGV[0]) and <$fh>} x 1), {}]) x 100,
     #['PUT', '/def', encode_json([{abctest => 1}]), {}],
 );
@@ -61,7 +62,7 @@ my @data_set = (
 my $data_sent = 0;
 my $orig_set_size = scalar(@data_set);
 my @handles;
-#while(@data_set){
+while(@data_set){
     my $cv = \AE::cv();
     while(scalar(@handles) < 1 and @data_set){
         AE::log info => "NEW:".scalar(@handles);
@@ -99,8 +100,7 @@ my @handles;
     $$cv->recv();
     @handles = grep {!$_->{hdl}->destroyed()} @handles;
     AE::log info => "LOOP:".scalar(@handles);
-
-#}
+}
 AE::log info => "LOOP END:".scalar(@handles);
 
 package AE::HTTP;
@@ -143,6 +143,10 @@ sub new {
     my $disconnect = sub {
         my ($hdl, $fatal, $msg) = @_;
         $hdl->destroy();
+        if($state->{-engine}{response_headers}{Connection} eq 'close'){
+            &{$state->{consumer}}(delete $state->{-engine}{current_data_body});
+            #_init($state);
+        }
         ${$state->{cv}}->send();
     };
     $hdl->on_error(sub {
@@ -271,19 +275,18 @@ sub read_response_headers {
 sub body_reader {
     my ($state) = @_;
     my $hdl = $state->{hdl};
-    #print '>>'.$hdl->rbuf.'<<'."\n";
     my $state_data = $state->{-engine};
-    $state_data->{current_data_body} .= delete $hdl->{rbuf};
-    if(defined $state_data->{size_wanted} and length($state_data->{current_data_body}) >= $state_data->{size_wanted}){
-        $hdl->{rbuf} = substr(
-            $state_data->{current_data_body},
-            $state_data->{size_wanted},
-            length($state_data->{current_data_body}),
-            ''
-        );
-        &{$state->{consumer}}(delete $state_data->{current_data_body});
-        _init($state);
-        return length($hdl->rbuf);
+    if(defined $state_data->{size_wanted}){
+        my $size_todo = $state_data->{size_wanted} - length($state_data->{current_data_body}//'');
+        $state_data->{current_data_body} .= substr($hdl->{rbuf}, 0, $size_todo, '');
+        if(length($state_data->{current_data_body}) >= $state_data->{size_wanted}){
+            &{$state->{consumer}}(delete $state_data->{current_data_body});
+            _init($state);
+            return length($hdl->rbuf);
+        }
+    } else {
+        $state_data->{current_data_body} .= delete $hdl->{rbuf};
+        return 0;
     }
     return 0;
 }
