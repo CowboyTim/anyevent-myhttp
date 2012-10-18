@@ -243,7 +243,7 @@ sub read_response_headers {
         #print $hdl->rbuf, ",,,,,L:".length($line),":",$line,"\n\n";
         my $state_data = $state->{-engine};
         if(length($line) == 0){
-            AE::log info => Dumper($state_data->{response_headers});
+            AE::log debug => Dumper($state_data->{response_headers});
             my $chunked = ($state_data->{response_headers}{"Transfer-Encoding"}//'') =~ /\bchunked\b/i;
             my $len = $chunked ? undef : $state_data->{response_headers}{"Content-Length"};
             if(defined $len){
