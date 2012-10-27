@@ -128,7 +128,7 @@ sub new {
 
     # make the handle
     my $hdl = new AnyEvent::Handle(
-        connect => [$state->{-engine}{request_host}, $state->{-engine}{request_port}],
+        connect => [$state->{request_host}, $state->{request_port}],
         on_connect => sub {
             my ($hdl, $host, $port, undef) = @_;
             AE::log info => "CONNECT:$hdl->{peername},$host:$port";
@@ -138,13 +138,13 @@ sub new {
     $hdl->on_read(sub {
         my ($hdl) = @_;
         AE::log debug => "on_read() called";
-        &{$state->{-engine}{request_cb}}($state);
+        &{$state->{request_cb}}($state);
     });
     my $disconnect = sub {
         my ($hdl, $fatal, $msg) = @_;
         $hdl->destroy();
-        if($state->{-engine}{response_headers}{Connection} eq 'close'){
-            &{$state->{consumer}}(delete $state->{-engine}{current_data_body});
+        if($state->{response_headers}{Connection} eq 'close'){
+            &{$state->{consumer}}(delete $state->{current_data_body});
             #_init($state);
         }
         ${$state->{cv}}->send();
@@ -157,26 +157,26 @@ sub new {
     $hdl->on_eof($disconnect);
     $hdl->on_drain(sub {
         my ($hdl) = @_;
-        &{$state->{-engine}{next_cb}}($state);
+        &{$state->{next_cb}}($state);
     });
 
     return bless $state, ref($class)||$class;
 }
 
 sub send_data {
-    my ($state) = @_;
-    my $str = substr($state->{-engine}{request_data}, 0, 10_000_000, '');
+    my ($self) = @_;
+    my $str = substr($self->{request_data}, 0, 10_000_000, '');
     unless (length($str)){
-        $state->{-engine}{next_cb} = \&schedule_next;
-        $state->{hdl}->on_drain(undef);
+        $self->{next_cb} = \&schedule_next;
+        $self->{hdl}->on_drain(undef);
         return 0;
     }
     return 1;
 }
 
 sub get_next {
-    my ($state) = @_;
-    my $data = &{$state->{producer}}();
+    my ($self) = @_;
+    my $data = &{$self->{producer}}();
     unless(defined $data){
         return;
     }
@@ -187,82 +187,85 @@ sub get_next {
 }
 
 sub schedule_next {
-    my ($state) = @_;
-    my ($method, $body, $host, $port, $path, $headers) = get_next($state);
+    my ($self) = @_;
+    my ($method, $body, $host, $port, $path, $headers) = get_next($self);
     unless($method){
-        ${$state->{cv}}->send();
+        ${$self->{cv}}->send();
         return 0;
     }
 
-    my $state_data = $state->{-engine} = {};
-
-    $state_data->{request_cb} = \&read_request_status;
-    $state_data->{next_cb}    = \&send_request;
-
-    $state_data->{request_method}  = $method;
-    $state_data->{request_data}    = $body // '';
-    $state_data->{request_headers} = $headers;
-    $state_data->{request_host}    = $host;
-    $state_data->{request_port}    = $port;
-    $state_data->{request_path}    = $path;
+    # start new
+    $self->{request_cb}      = \&read_request_status;
+    $self->{next_cb}         = \&send_request;
+    $self->{request_method}  = $method;
+    $self->{request_data}    = $body // '';
+    $self->{request_headers} = $headers;
+    $self->{request_host}    = $host;
+    $self->{request_port}    = $port;
+    $self->{request_path}    = $path;
+    delete @{$self}{qw(
+        size_wanted
+        response_headers
+        current_data_body
+        current_chunk
+        chunk_wanted_size
+    )};
     AE::log debug => "schedule_next: $method $host $path";
     return 1;
 }
 
 sub send_request {
-    my ($state) = @_;
-    my $state_data = $state->{-engine};
-    $state_data->{next_cb} = \&send_data;
+    my ($self) = @_;
+    $self->{next_cb} = \&send_data;
 
-    my %hdr = (%{$ua->{headers}}, %{$state_data->{request_headers}//{}});
-    $hdr{'content-length'} = length($state_data->{request_data});
-    my $buf = "$state_data->{request_method} $state_data->{request_path} HTTP/1.1\r\n"
+    my %hdr = (%{$ua->{headers}}, %{$self->{request_headers}//{}});
+    $hdr{'content-length'} = length($self->{request_data});
+    my $buf = "$self->{request_method} $self->{request_path} HTTP/1.1\r\n"
          . join('', map "\u$_: $hdr{$_}\r\n", grep defined $hdr{$_}, keys %hdr)
          . "\r\n";
-    #print "HEADERS>>$buf<<\n";
     AE::log debug => "send_request: $buf";
-    $state->{hdl}->push_write($buf);
+    $self->{hdl}->push_write($buf);
     return 0;
 }
 
 sub read_request_status {
-    my ($state) = @_;
-    AE::log debug => "read_request_status:".$state->{hdl}->rbuf;
-    $state->{hdl}->rbuf =~ s/^\r\n//;
-    if ($state->{hdl}->rbuf =~ s/^HTTP\/1\.1 (\d+) (.*?)\r\n//){
+    my ($self) = @_;
+    AE::log debug => "read_request_status:".$self->{hdl}->rbuf;
+    $self->{hdl}->rbuf =~ s/^\r\n//;
+    if ($self->{hdl}->rbuf =~ s/^HTTP\/1\.1 (\d+) (.*?)\r\n//){
         my ($code, $msg) = ($1, $2);
         AE::log info => "RESPONSE OK:$code, $msg";
-        $state->{-engine}{request_cb} = \&read_response_headers;
+        $self->{request_cb} = \&read_response_headers;
         return 1;
     }
     return 0;
 }
 
 sub read_response_headers {
-    my ($state) = @_;
-    my $hdl = $state->{hdl};
-    #print '>>'.$hdl->rbuf.'<<'."\n";
+    my ($self) = @_;
+    my $hdl = $self->{hdl};
+    AE::log debug => "read_response_headers:".$hdl->rbuf;
     if ($hdl->rbuf =~ s/^(.*?)\r\n//){
         my $line = $1;
-        #print $hdl->rbuf, ",,,,,L:".length($line),":",$line,"\n\n";
-        my $state_data = $state->{-engine};
+        AE::log debug => "read_response_headers (line):".$line;
         if(length($line) == 0){
-            AE::log debug => Dumper($state_data->{response_headers});
-            my $chunked = ($state_data->{response_headers}{"Transfer-Encoding"}//'') =~ /\bchunked\b/i;
-            my $len = $chunked ? undef : $state_data->{response_headers}{"Content-Length"};
+            my $rh = $self->{response_headers};
+            AE::log debug => Dumper($rh);
+            my $chunked = ($rh->{"Transfer-Encoding"}//'') =~ /\bchunked\b/i;
+            my $len = $chunked ? undef : $rh->{"Content-Length"};
             if(defined $len){
-                $state_data->{size_wanted} = $len;
-                $state_data->{request_cb}  = \&body_reader;
+                $self->{size_wanted} = $len;
+                $self->{request_cb}  = \&body_reader;
             } else {
                 if($chunked){
-                    $state_data->{request_cb} = \&chunked_body_reader;
+                    $self->{request_cb} = \&chunked_body_reader;
                 } else {
-                    $state_data->{request_cb} = \&body_reader;
+                    $self->{request_cb} = \&body_reader;
                 }
             }
         } else {
             if(my ($h, $v) = ($line =~ m/^(.*?): (.*)/)){
-                $state_data->{response_headers}{$h} = $v;
+                $self->{response_headers}{$h} = $v;
                 return length($hdl->rbuf);
             }
             return 0;
@@ -273,34 +276,34 @@ sub read_response_headers {
 }
 
 sub body_reader {
-    my ($state) = @_;
-    my $hdl = $state->{hdl};
-    my $state_data = $state->{-engine};
-    if(defined $state_data->{size_wanted}){
-        my $size_todo = $state_data->{size_wanted} - length($state_data->{current_data_body}//'');
-        $state_data->{current_data_body} .= substr($hdl->{rbuf}, 0, $size_todo, '');
-        if(length($state_data->{current_data_body}) >= $state_data->{size_wanted}){
-            &{$state->{consumer}}(delete $state_data->{current_data_body});
-            _init($state);
+    my ($self) = @_;
+    my $hdl = $self->{hdl};
+    my $size = $self->{size_wanted};
+    if(defined $size){
+        my $size_todo = $size - length($self->{current_data_body}//'');
+        $self->{current_data_body} .= substr($hdl->{rbuf}, 0, $size_todo, '');
+        if(length($self->{current_data_body}) >= $size){
+            &{$self->{consumer}}(delete $self->{current_data_body});
+            _init($self);
             return length($hdl->rbuf);
         }
     } else {
-        $state_data->{current_data_body} .= delete $hdl->{rbuf};
+        $self->{current_data_body} .= delete $hdl->{rbuf};
         return 0;
     }
     return 0;
 }
 
 sub chunk_reader {
-    my ($state) = @_;
-    my $hdl = $state->{hdl};
-    my $state_data = $state->{-engine};
-    AE::log debug => "CHUNK>>$state_data->{chunk_wanted_size}>>".$hdl->rbuf;
-    my $size_todo = $state_data->{chunk_wanted_size} - length($state_data->{current_chunk}//'');
-    $state_data->{current_chunk} .= substr($hdl->{rbuf}, 0, $size_todo, '');
-    if(length($state_data->{current_chunk}) >= $state_data->{chunk_wanted_size}){
-        $state_data->{current_data_body} .= delete $state_data->{current_chunk};
-        $state_data->{request_cb} = \&chunked_body_reader;
+    my ($self) = @_;
+    my $hdl = $self->{hdl};
+    my $size = $self->{chunk_wanted_size};
+    AE::log debug => "CHUNK>>$size>>".$hdl->rbuf;
+    my $size_todo = $size - length($self->{current_chunk}//'');
+    $self->{current_chunk} .= substr($hdl->{rbuf}, 0, $size_todo, '');
+    if(length($self->{current_chunk}) >= $size){
+        $self->{current_data_body} .= delete $self->{current_chunk};
+        $self->{request_cb} = \&chunked_body_reader;
         return length($hdl->rbuf);
     }
     AE::log debug => "LEFTCHUNK>>".$hdl->rbuf;
@@ -308,8 +311,8 @@ sub chunk_reader {
 }
 
 sub chunked_body_reader {
-    my ($state) = @_;
-    my $hdl = $state->{hdl};
+    my ($self) = @_;
+    my $hdl = $self->{hdl};
     AE::log debug => "CHUNKBODYREADER>>".$hdl->rbuf;
     if($hdl->rbuf =~ s/^\r\n//){
         return length($hdl->rbuf);
@@ -317,13 +320,12 @@ sub chunked_body_reader {
     if($hdl->rbuf =~ s/^([0-9A-Fa-f]+?)\r\n//){
         my $size = hex($1);
         AE::log debug => "chunk size: hex($1) = $size";
-        my $state_data = $state->{-engine};
         if($size){
-            $state_data->{chunk_wanted_size} = $size;
-            $state_data->{request_cb} = \&chunk_reader;
+            $self->{chunk_wanted_size} = $size;
+            $self->{request_cb} = \&chunk_reader;
         } else {
-            &{$state->{consumer}}(delete $state_data->{current_data_body});
-            _init($state);
+            &{$self->{consumer}}(delete $self->{current_data_body});
+            _init($self);
         }
         return length($hdl->rbuf);
     }
@@ -331,13 +333,13 @@ sub chunked_body_reader {
 }
 
 sub _init {
-    my ($state) = @_;
-    my $hdl = $state->{hdl};
-    schedule_next($state);
+    my ($self) = @_;
+    my $hdl = $self->{hdl};
+    schedule_next($self);
     $hdl->on_drain(sub {
         my ($hdl) = @_;
         AE::log debug => "_init(): called next_cb";
-        &{$state->{-engine}{next_cb}}($state);
+        &{$self->{next_cb}}($self);
     });
 }
 
