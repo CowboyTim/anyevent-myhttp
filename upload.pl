@@ -22,7 +22,8 @@ AnyEvent::Log::ctx->level("info");
 $AnyEvent::Log::FILTER->level("trace");
 
 my @data_set = (
-    ['GET', 'https://www.google.be/', undef, {'Accept-Encoding' => 'gzip'}],
+    ['GET', 'https://www.facebook.com/', undef, {Connection => 'close'}],
+    #['GET', 'https://www.google.be/', undef, {Connection => 'close', 'Accept-Encoding' => 'gzip'}],
     #['GET', 'http://localhost:8080/', undef, {Connection => 'close', 'Accept-Encoding' => 'gzip'}],
     #['PUT', '/def', encode_json([{abctest => 1}]), {}],
 );
@@ -47,8 +48,8 @@ while(@data_set){
                 my ($response) = @_;
                 AE::log info => "RESPONSE:".scalar(@data_set);
                 $data_sent++;
-                AE::log info => "OK:$data_sent, $orig_set_size, responsebody:$response";
-                print $response;
+                AE::log info => "OK:$data_sent, $orig_set_size, responsebody:".($response//'<undef>');
+                print $response if defined $response;
                 if(scalar(@data_set) == 0 and $data_sent == $orig_set_size){
                     AE::log info => "END OK:$data_sent, $orig_set_size, ".scalar(@data_set);
                     ${$cv}->send();
@@ -180,7 +181,7 @@ sub schedule_next {
     }
 
     # start new
-    $self->{request_cb}      = \&read_request_status;
+    $self->{request_cb}      = \&read_response_status;
     $self->{next_cb}         = \&send_request;
     $self->{request_method}  = $method;
     $self->{request_data}    = $body // '';
@@ -195,6 +196,8 @@ sub schedule_next {
         current_data_body
         current_chunk
         chunk_wanted_size
+        response_status_code
+        response_status_message
     )};
     AE::log debug => "schedule_next: $method $host $path";
     return 1;
@@ -214,12 +217,14 @@ sub send_request {
     return 0;
 }
 
-sub read_request_status {
+sub read_response_status {
     my ($self) = @_;
-    AE::log debug => "read_request_status:".$self->{hdl}->rbuf;
+    AE::log debug => "read_response_status:".$self->{hdl}->rbuf;
     $self->{hdl}->rbuf =~ s/^\r\n//;
     if ($self->{hdl}->rbuf =~ s/^HTTP\/1\.1 (\d+) (.*?)\r\n//){
         my ($code, $msg) = ($1, $2);
+        $self->{response_status_code}    = $code;
+        $self->{response_status_message} = $msg;
         AE::log info => "RESPONSE OK:$code, $msg";
         $self->{request_cb} = \&read_response_headers;
         return 1;
