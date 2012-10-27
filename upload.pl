@@ -20,8 +20,6 @@ GetOptions(
     "password=s",
     "httpsverify!",
     "timeout=i",
-    "port=i",
-    "server=s",
 );
 
 my $ua = {
@@ -33,7 +31,6 @@ my $ua = {
         "content-length"  => 0,
         "connection"      => 'Keep-Alive',
         #'Accept-Encoding' => 'identity',
-        #'Content-Encoding'=> 'gzip',
     },
     tls_ctx    => {
         method => 'SSLv3',
@@ -52,9 +49,9 @@ $AnyEvent::Log::FILTER->level("trace");
 
 
 my @data_set = (
-    ['GET', 'http://www.google.be/', undef, {}],
-    ['GET', 'http://www.google.be/', undef, {}],
-    ['GET', 'http://www.google.be/', undef, {}],
+    #['GET', 'http://www.google.be/', undef, {}],
+    #['GET', 'http://www.google.be/', undef, {}],
+    ['GET', 'http://localhost:8080/', undef, {Connection => 'close', 'Accept-Encoding' => 'gzip'}],
     #['PUT', '/abc', (scalar(do {local $/; my $fh; open($fh, '<', $ARGV[0]) and <$fh>} x 1), {}]) x 100,
     #['PUT', '/def', encode_json([{abctest => 1}]), {}],
 );
