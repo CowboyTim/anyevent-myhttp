@@ -15,6 +15,7 @@ GetOptions(
     },
     "username=s",
     "password=s",
+    "header|h=s%",
     "httpsverify!",
 );
 
@@ -69,6 +70,7 @@ while(@data_set){
                 (($opts->{username} and $opts->{password})?
                     ("Authorization" => "Basic ".encode_base64("$opts->{username}:$opts->{password}", '')):()),
                 "Connection"      => 'Keep-Alive',
+                %{$opts->{header}//{}}
             },
             # config to handle https
             tls_ctx    => {
