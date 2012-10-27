@@ -23,8 +23,9 @@ AnyEvent::Log::ctx->level("info");
 $AnyEvent::Log::FILTER->level("trace");
 
 my @data_set = (
-    #['GET', 'http://www.facebook.com/', undef, {Connection => 'close'}],
-    ['GET', 'https://www.google.be/', undef, {Connection => 'close', 'Accept-Encoding' => 'gzip'}],
+    ['GET', 'http://www.facebook.com/', undef, {Connection => 'close'}],
+    ['GET', 'http://www.deredactie.be/', undef, {Connection => 'close', }],
+    #['GET', 'https://www.google.be/', undef, {Connection => 'close', 'Accept-Encoding' => 'gzip'}],
     #['GET', 'http://localhost:8080/', undef, {Connection => 'close', 'Accept-Encoding' => 'gzip'}],
     #['PUT', '/def', encode_json([{abctest => 1}]), {}],
 );
@@ -47,9 +48,11 @@ while(@data_set){
             # consumer
             consumer => sub {
                 my ($code, $msg, $response) = @_;
-                AE::log info => "RESPONSE:".scalar(@data_set);
+                AE::log info => "CONSUMER LEFT:".scalar(@data_set);
                 $data_sent++;
-                AE::log info => "OK:$data_sent, $orig_set_size, responsebody:".($response//'<undef>');
+                AE::log info =>
+                    "OK:$data_sent, $orig_set_size, ".
+                    "response body:".($response//'<undef>').", status: $code, msg: ".($msg//'');
                 print $response if defined $response;
                 if(scalar(@data_set) == 0 and $data_sent == $orig_set_size){
                     AE::log info => "END OK:$data_sent, $orig_set_size, ".scalar(@data_set);
@@ -65,7 +68,6 @@ while(@data_set){
             # default headers stuff, can be overridden with individual
             # requests
             headers    => {
-                "Host"            => "localhost",
                 "User-Agent"      => "SomeClientSpeedTest/1.0",
                 (($opts->{username} and $opts->{password})?
                     ("Authorization" => "Basic ".encode_base64("$opts->{username}:$opts->{password}", '')):()),
@@ -194,7 +196,14 @@ sub schedule_next {
     $self->{request_port}    = $port;
     $self->{request_protocol}= $scheme;
     $self->{request_path}    = $path;
+
+    # add some headers
     $self->{request_headers}{'Content-Length'} = length($self->{request_data});
+    $self->{request_headers}{'Host'}  = $self->{request_host};
+    $self->{request_headers}{'Host'} .= ":$self->{request_port}"
+        if ($self->{request_port}//'') ne '80';
+
+    # delete internal previous request state
     delete @{$self}{qw(
         size_wanted
         response_headers
