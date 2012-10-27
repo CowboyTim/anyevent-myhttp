@@ -4,6 +4,8 @@ use strict; use warnings;
 use Data::Dumper;
 use Getopt::Long;
 use MIME::Base64 qw(encode_base64);
+use Compress::Zlib;
+use Compress::Bzip2;
 
 use AE;
 use EV;
@@ -23,9 +25,10 @@ AnyEvent::Log::ctx->level("info");
 $AnyEvent::Log::FILTER->level("trace");
 
 my @data_set = (
-    ['GET', 'http://www.facebook.com/', undef, {Connection => 'close'}],
-    ['GET', 'http://www.deredactie.be/', undef, {Connection => 'close', }],
-    #['GET', 'https://www.google.be/', undef, {Connection => 'close', 'Accept-Encoding' => 'gzip'}],
+    #['GET', 'http://www.browserscope.org/', undef, {Connection => 'close', 'Accept-Encoding' => 'gzip'}],
+    #['GET', 'http://www.facebook.com/', undef, {Connection => 'close'}],
+    #['GET', 'http://www.deredactie.be/', undef, {Connection => 'close', }],
+    ['GET', 'https://www.google.be/', undef, {Connection => 'close', 'Accept-Encoding' => 'gzip'}],
     #['GET', 'http://localhost:8080/', undef, {Connection => 'close', 'Accept-Encoding' => 'gzip'}],
     #['PUT', '/def', encode_json([{abctest => 1}]), {}],
 );
@@ -206,12 +209,14 @@ sub schedule_next {
     # delete internal previous request state
     delete @{$self}{qw(
         size_wanted
+        size_gotten
         response_headers
         current_data_body
         current_chunk
         chunk_wanted_size
         response_status_code
         response_status_message
+        uncompress
     )};
     AE::log debug => "schedule_next: $method $host $path";
     return 1;
@@ -255,16 +260,41 @@ sub read_response_headers {
         if(length($line) == 0){
             my $rh = $self->{response_headers};
             AE::log debug => Dumper($rh);
+
+            # add a uncompressor if wanted
+            if($rh->{"Content-Encoding"} =~ 'gzip'){
+                my $dbuf = '';
+                my ($i, $status) = inflateInit();
+                die "Error doing inflateInit()\n" unless $status == Z_OK;
+                $self->{uncompress} = sub {
+                    my ($buf, $input) = @_;
+                    $dbuf .= $$input;
+                    AE::log debug => Dumper($input);
+                    my ($out, $status) = $i->inflate(\$dbuf);
+                    if ($status == Z_OK or $status == Z_STREAM_END){
+                        AE::log debug => 'COMPRESS Z_OK';
+                        $$buf .= $out;
+                    }
+                    AE::log debug => "COMPRESS STATUS: ".$status.", size:".length($dbuf);;
+                };
+            }
+
+            # if chunked, use the chunked body reader, else just the
+            # regular one
             my $chunked = ($rh->{"Transfer-Encoding"}//'') =~ /\bchunked\b/i;
-            my $len = $chunked ? undef : $rh->{"Content-Length"};
-            if(defined $len){
-                $self->{size_wanted} = $len;
+            if(!$chunked){
+                $self->{current_data_body} = '';
+                $self->{size_gotten} = 0;
+                $self->{size_wanted} = $rh->{"Content-Length"};
                 $self->{request_cb}  = \&body_reader;
             } else {
                 if($chunked){
                     $self->{request_cb} = \&chunked_body_reader;
                 } else {
-                    $self->{request_cb} = \&body_reader;
+                    $self->{current_data_body} = '';
+                    $self->{size_gotten} = 0;
+                    $self->{size_wanted} = $rh->{"Content-Length"};
+                    $self->{request_cb}  = \&body_reader;
                 }
             }
         } else {
@@ -284,9 +314,15 @@ sub body_reader {
     my $hdl = $self->{hdl};
     my $size = $self->{size_wanted};
     if(defined $size){
-        my $size_todo = $size - length($self->{current_data_body}//'');
-        $self->{current_data_body} .= substr($hdl->{rbuf}, 0, $size_todo, '');
-        if(length($self->{current_data_body}) >= $size){
+        my $size_todo = $size - $self->{size_gotten};
+        my $next_block = substr($hdl->{rbuf}, 0, $size_todo, '');
+        $self->{size_gotten} += length($next_block);
+        if(exists $self->{uncompress}){
+            &{$self->{uncompress}}(\$self->{current_data_body}, \$next_block);
+        } else {
+            $self->{current_data_body} .= $next_block;
+        }
+        if($self->{size_gotten} >= $size){
             &{$self->{consumer}}(
                 delete @{$self}{qw(response_status_code response_status_message current_data_body)}
             );
@@ -294,7 +330,10 @@ sub body_reader {
             return length($hdl->rbuf);
         }
     } else {
-        $self->{current_data_body} .= delete $hdl->{rbuf};
+        # FIXME: todo, uncompress
+        my $next_block = delete $hdl->{rbuf};
+        $self->{size_gotten} += length($next_block);
+        $self->{current_data_body} .= $next_block;
         return 0;
     }
     return 0;
