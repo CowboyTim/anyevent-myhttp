@@ -22,8 +22,8 @@ AnyEvent::Log::ctx->level("info");
 $AnyEvent::Log::FILTER->level("trace");
 
 my @data_set = (
-    ['GET', 'https://www.facebook.com/', undef, {Connection => 'close'}],
-    #['GET', 'https://www.google.be/', undef, {Connection => 'close', 'Accept-Encoding' => 'gzip'}],
+    #['GET', 'http://www.facebook.com/', undef, {Connection => 'close'}],
+    ['GET', 'https://www.google.be/', undef, {Connection => 'close', 'Accept-Encoding' => 'gzip'}],
     #['GET', 'http://localhost:8080/', undef, {Connection => 'close', 'Accept-Encoding' => 'gzip'}],
     #['PUT', '/def', encode_json([{abctest => 1}]), {}],
 );
@@ -45,7 +45,7 @@ while(@data_set){
             },
             # consumer
             consumer => sub {
-                my ($response) = @_;
+                my ($code, $msg, $response) = @_;
                 AE::log info => "RESPONSE:".scalar(@data_set);
                 $data_sent++;
                 AE::log info => "OK:$data_sent, $orig_set_size, responsebody:".($response//'<undef>');
@@ -130,7 +130,9 @@ sub new {
         my ($hdl, $fatal, $msg) = @_;
         $hdl->destroy();
         if(($state->{response_headers}{Connection} // '') eq 'close'){
-            &{$state->{consumer}}(delete $state->{current_data_body});
+            &{$state->{consumer}}(
+                delete @{$state}{qw(response_status_code response_status_message current_data_body)}
+            );
             #_init($state);
         }
         ${$state->{cv}}->send();
@@ -190,6 +192,7 @@ sub schedule_next {
     $self->{request_port}    = $port;
     $self->{request_protocol}= $scheme;
     $self->{request_path}    = $path;
+    $self->{request_headers}{'Content-Length'} = length($self->{request_data});
     delete @{$self}{qw(
         size_wanted
         response_headers
@@ -208,7 +211,6 @@ sub send_request {
     $self->{next_cb} = \&send_data;
 
     my %hdr = (%{$self->{headers}}, %{$self->{request_headers}//{}});
-    $hdr{'content-length'} = length($self->{request_data});
     my $buf = "$self->{request_method} $self->{request_path} HTTP/1.1\r\n"
          . join('', map "\u$_: $hdr{$_}\r\n", grep defined $hdr{$_}, keys %hdr)
          . "\r\n";
@@ -223,9 +225,9 @@ sub read_response_status {
     $self->{hdl}->rbuf =~ s/^\r\n//;
     if ($self->{hdl}->rbuf =~ s/^HTTP\/1\.1 (\d+) (.*?)\r\n//){
         my ($code, $msg) = ($1, $2);
+        AE::log info => "RESPONSE: $code, $msg";
         $self->{response_status_code}    = $code;
         $self->{response_status_message} = $msg;
-        AE::log info => "RESPONSE OK:$code, $msg";
         $self->{request_cb} = \&read_response_headers;
         return 1;
     }
@@ -274,7 +276,9 @@ sub body_reader {
         my $size_todo = $size - length($self->{current_data_body}//'');
         $self->{current_data_body} .= substr($hdl->{rbuf}, 0, $size_todo, '');
         if(length($self->{current_data_body}) >= $size){
-            &{$self->{consumer}}(delete $self->{current_data_body});
+            &{$self->{consumer}}(
+                delete @{$self}{qw(response_status_code response_status_message current_data_body)}
+            );
             _init($self);
             return length($hdl->rbuf);
         }
@@ -315,7 +319,9 @@ sub chunked_body_reader {
             $self->{chunk_wanted_size} = $size;
             $self->{request_cb} = \&chunk_reader;
         } else {
-            &{$self->{consumer}}(delete $self->{current_data_body});
+            &{$self->{consumer}}(
+                delete @{$self}{qw(response_status_code response_status_message current_data_body)}
+            );
             _init($self);
         }
         return length($hdl->rbuf);
