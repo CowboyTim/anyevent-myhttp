@@ -9,50 +9,21 @@ use AE;
 use EV;
 use AnyEvent::Log;
 
-
 GetOptions(
     my $opts = {
         httpsverify => 0,
-        timeout     => 10,
-        port        => 80
     },
     "username=s",
     "password=s",
     "httpsverify!",
-    "timeout=i",
 );
-
-my $ua = {
-    headers    => {
-        "host"            => "localhost",
-        "user-agent"      => "SomeClientSpeedTest/1.0",
-        (($opts->{username} and $opts->{password})?
-            ("Authorization" => "Basic ".encode_base64("$opts->{username}:$opts->{password}", '')):()),
-        "content-length"  => 0,
-        "connection"      => 'Keep-Alive',
-        #'Accept-Encoding' => 'identity',
-    },
-    tls_ctx    => {
-        method => 'SSLv3',
-        verify => $opts->{httpsverify} // 0,
-    },
-    handle_params => {
-        max_read_size => 100_000,
-    },
-    persistent => 1,
-    keepalive  => 1,
-    timeout    => $opts->{timeout}     // 300,
-};
 
 AnyEvent::Log::ctx->level("info");
 $AnyEvent::Log::FILTER->level("trace");
 
-
 my @data_set = (
-    #['GET', 'http://www.google.be/', undef, {}],
-    #['GET', 'http://www.google.be/', undef, {}],
-    ['GET', 'http://localhost:8080/', undef, {Connection => 'close', 'Accept-Encoding' => 'gzip'}],
-    #['PUT', '/abc', (scalar(do {local $/; my $fh; open($fh, '<', $ARGV[0]) and <$fh>} x 1), {}]) x 100,
+    ['GET', 'https://www.google.be/', undef, {'Accept-Encoding' => 'gzip'}],
+    #['GET', 'http://localhost:8080/', undef, {Connection => 'close', 'Accept-Encoding' => 'gzip'}],
     #['PUT', '/def', encode_json([{abctest => 1}]), {}],
 );
 
@@ -78,7 +49,6 @@ while(@data_set){
                 $data_sent++;
                 AE::log info => "OK:$data_sent, $orig_set_size, responsebody:$response";
                 print $response;
-                #push @data_set, ['GET', 'http://www.google.be/', undef, {}];
                 if(scalar(@data_set) == 0 and $data_sent == $orig_set_size){
                     AE::log info => "END OK:$data_sent, $orig_set_size, ".scalar(@data_set);
                     ${$cv}->send();
@@ -89,7 +59,21 @@ while(@data_set){
                 unshift @data_set, $_[0];
             },
             # condvar
-            cv => $cv
+            cv => $cv,
+            # default headers stuff, can be overridden with individual
+            # requests
+            headers    => {
+                "Host"            => "localhost",
+                "User-Agent"      => "SomeClientSpeedTest/1.0",
+                (($opts->{username} and $opts->{password})?
+                    ("Authorization" => "Basic ".encode_base64("$opts->{username}:$opts->{password}", '')):()),
+                "Connection"      => 'Keep-Alive',
+            },
+            # config to handle https
+            tls_ctx    => {
+                method => 'SSLv3',
+                verify => $opts->{httpsverify} // 0,
+            },
         });
         push @handles, $hdl;
     }
@@ -126,6 +110,10 @@ sub new {
     # make the handle
     my $hdl = new AnyEvent::Handle(
         connect => [$state->{request_host}, $state->{request_port}],
+        ($state->{request_protocol} eq 'https'?(
+            tls_ctx => $state->{tls_ctx},
+            tls     => 'connect'
+        ):()),
         on_connect => sub {
             my ($hdl, $host, $port, undef) = @_;
             AE::log info => "CONNECT:$hdl->{peername},$host:$port";
@@ -140,7 +128,7 @@ sub new {
     my $disconnect = sub {
         my ($hdl, $fatal, $msg) = @_;
         $hdl->destroy();
-        if($state->{response_headers}{Connection} eq 'close'){
+        if(($state->{response_headers}{Connection} // '') eq 'close'){
             &{$state->{consumer}}(delete $state->{current_data_body});
             #_init($state);
         }
@@ -180,12 +168,12 @@ sub get_next {
     my $uri = URI->new($data->[1]);
     AE::log info => "$data->[0] ".$uri->as_string();
     #$uri->query_form(map {$_, $params->{$_}} grep {defined $params->{$_}} keys %{$params});
-    return $data->[0], $data->[2], $uri->host(), $uri->port(), $uri->as_string(), $data->[3];
+    return $data->[0], $data->[2], $uri->host(), $uri->port(), $uri->scheme(), $uri->as_string(), $data->[3];
 }
 
 sub schedule_next {
     my ($self) = @_;
-    my ($method, $body, $host, $port, $path, $headers) = get_next($self);
+    my ($method, $body, $host, $port, $scheme, $path, $headers) = get_next($self);
     unless($method){
         ${$self->{cv}}->send();
         return 0;
@@ -199,6 +187,7 @@ sub schedule_next {
     $self->{request_headers} = $headers;
     $self->{request_host}    = $host;
     $self->{request_port}    = $port;
+    $self->{request_protocol}= $scheme;
     $self->{request_path}    = $path;
     delete @{$self}{qw(
         size_wanted
@@ -215,7 +204,7 @@ sub send_request {
     my ($self) = @_;
     $self->{next_cb} = \&send_data;
 
-    my %hdr = (%{$ua->{headers}}, %{$self->{request_headers}//{}});
+    my %hdr = (%{$self->{headers}}, %{$self->{request_headers}//{}});
     $hdr{'content-length'} = length($self->{request_data});
     my $buf = "$self->{request_method} $self->{request_path} HTTP/1.1\r\n"
          . join('', map "\u$_: $hdr{$_}\r\n", grep defined $hdr{$_}, keys %hdr)
