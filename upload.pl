@@ -26,7 +26,10 @@ my @data_set = (
     #['GET', 'http://www.browserscope.org/', undef, {Connection => 'close', 'Accept-Encoding' => 'gzip'}],
     #['GET', 'http://www.facebook.com/', undef, {Connection => 'close'}],
     #['GET', 'http://www.deredactie.be/', undef, {Connection => 'close', }],
-    ['GET', 'https://www.google.be/', undef, {Connection => 'close', 'Accept-Encoding' => 'gzip'}],
+    #['GET', 'https://www.google.be/', undef, {Connection => 'close'}],
+    #['GET', 'https://www.google.be/', undef, {Connection => 'close'}],
+    ['GET', 'https://www.google.be/', undef, {}],
+    #['GET', 'https://www.google.be/', undef, {Connection => 'close', 'Accept-Encoding' => 'gzip'}],
     #['GET', 'http://localhost:8080/', undef, {Connection => 'close', 'Accept-Encoding' => 'gzip'}],
     #['PUT', '/def', encode_json([{abctest => 1}]), {}],
 );
@@ -185,6 +188,16 @@ sub schedule_next {
         return 0;
     }
 
+    %{$self} = (
+        producer      => $self->{producer},
+        consumer      => $self->{consumer},
+        error_handler => $self->{error_handler},
+        cv            => $self->{cv},
+        headers       => $self->{headers},
+        tls_ctx       => $self->{tls_ctx},
+        hdl           => $self->{hdl},
+    );
+
     # start new
     $self->{request_cb}      = \&read_response_status;
     $self->{next_cb}         = \&send_request;
@@ -202,18 +215,6 @@ sub schedule_next {
     $self->{request_headers}{'Host'} .= ":$self->{request_port}"
         if ($self->{request_port}//'') ne '80';
 
-    # delete internal previous request state
-    delete @{$self}{qw(
-        size_wanted
-        size_gotten
-        response_headers
-        current_data_body
-        current_chunk
-        chunk_wanted_size
-        response_status_code
-        response_status_message
-        uncompress
-    )};
     AE::log debug => "schedule_next: $method $host $path";
     return 1;
 }
@@ -317,7 +318,9 @@ sub body_reader {
     } else {
         $self->{current_data_body} .= $next_block;
     }
-    if(!defined $size or $self->{size_gotten} >= $size){
+    if(!defined $size){
+        return 0
+    } elsif ($self->{size_gotten} >= $size){
         &{$self->{consumer}}(
             delete @{$self}{qw(response_status_code response_status_message current_data_body)}
         );
