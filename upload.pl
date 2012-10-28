@@ -4,8 +4,6 @@ use strict; use warnings;
 use Data::Dumper;
 use Getopt::Long;
 use MIME::Base64 qw(encode_base64);
-use Compress::Zlib;
-use Compress::Bzip2;
 
 use AE;
 use EV;
@@ -99,8 +97,10 @@ use strict; use warnings;
 use URI;
 use Errno;
 use IO::Socket::SSL;
-use Compress::Zlib;
 use Data::Dumper;
+use Compress::Zlib;
+use Compress::Bzip2;
+use Encode qw(_utf8_off);
 
 use AnyEvent::Socket;
 use AnyEvent::Handle;
@@ -313,28 +313,26 @@ sub body_reader {
     my ($self) = @_;
     my $hdl = $self->{hdl};
     my $size = $self->{size_wanted};
+    my $size_todo;
     if(defined $size){
-        my $size_todo = $size - $self->{size_gotten};
-        my $next_block = substr($hdl->{rbuf}, 0, $size_todo, '');
-        $self->{size_gotten} += length($next_block);
-        if(exists $self->{uncompress}){
-            &{$self->{uncompress}}(\$self->{current_data_body}, \$next_block);
-        } else {
-            $self->{current_data_body} .= $next_block;
-        }
-        if($self->{size_gotten} >= $size){
-            &{$self->{consumer}}(
-                delete @{$self}{qw(response_status_code response_status_message current_data_body)}
-            );
-            _init($self);
-            return length($hdl->rbuf);
-        }
+        $size_todo = $size - $self->{size_gotten};
     } else {
-        # FIXME: todo, uncompress
-        my $next_block = delete $hdl->{rbuf};
-        $self->{size_gotten} += length($next_block);
+        $size_todo = length($hdl->{rbuf});
+    }
+    my $next_block = substr($hdl->{rbuf}, 0, $size_todo, '');
+    _utf8_off($next_block);
+    $self->{size_gotten} += length($next_block);
+    if(exists $self->{uncompress}){
+        &{$self->{uncompress}}(\$self->{current_data_body}, \$next_block);
+    } else {
         $self->{current_data_body} .= $next_block;
-        return 0;
+    }
+    if(!defined $size or $self->{size_gotten} >= $size){
+        &{$self->{consumer}}(
+            delete @{$self}{qw(response_status_code response_status_message current_data_body)}
+        );
+        _init($self);
+        return length($hdl->rbuf);
     }
     return 0;
 }
