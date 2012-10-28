@@ -98,16 +98,12 @@ use URI;
 use Errno;
 use IO::Socket::SSL;
 use Data::Dumper;
-use Compress::Zlib;
-use Compress::Bzip2;
-use Encode qw(_utf8_off);
+use IO::Uncompress::Gunzip qw(gunzip);
+use IO::Uncompress::Bunzip2 qw(bunzip2);
 
 use AnyEvent::Socket;
 use AnyEvent::Handle;
 use AnyEvent::Log;
-
-
-
 
 sub new {
     my ($class, $state) = @_;
@@ -261,24 +257,6 @@ sub read_response_headers {
             my $rh = $self->{response_headers};
             AE::log debug => Dumper($rh);
 
-            # add a uncompressor if wanted
-            if($rh->{"Content-Encoding"} =~ 'gzip'){
-                my $dbuf = '';
-                my ($i, $status) = inflateInit();
-                die "Error doing inflateInit()\n" unless $status == Z_OK;
-                $self->{uncompress} = sub {
-                    my ($buf, $input) = @_;
-                    $dbuf .= $$input;
-                    AE::log debug => Dumper($input);
-                    my ($out, $status) = $i->inflate(\$dbuf);
-                    if ($status == Z_OK or $status == Z_STREAM_END){
-                        AE::log debug => 'COMPRESS Z_OK';
-                        $$buf .= $out;
-                    }
-                    AE::log debug => "COMPRESS STATUS: ".$status.", size:".length($dbuf);;
-                };
-            }
-
             # if chunked, use the chunked body reader, else just the
             # regular one
             my $chunked = ($rh->{"Transfer-Encoding"}//'') =~ /\bchunked\b/i;
@@ -297,6 +275,19 @@ sub read_response_headers {
                     $self->{request_cb}  = \&body_reader;
                 }
             }
+
+            # add a uncompressor if wanted
+            if($rh->{"Content-Encoding"} ~~ 'gzip'){
+                my $dbuf = '';
+                $self->{uncompress} = sub {
+                    my ($buf, $input) = @_;
+                    $dbuf .= $$input;
+                    AE::log debug => Dumper($input);
+                    gunzip(\$dbuf => \$self->{current_data_body}, TrailingData => \my $abc);
+                    AE::log debug => "UNCOMPRESS LEFT:".length($abc//'').", buffer: ".length($dbuf).", length output:".length($self->{current_data_body});
+                };
+            }
+
         } else {
             if(my ($h, $v) = ($line =~ m/^(.*?): (.*)/)){
                 $self->{response_headers}{$h} = $v;
@@ -320,7 +311,6 @@ sub body_reader {
         $size_todo = length($hdl->{rbuf});
     }
     my $next_block = substr($hdl->{rbuf}, 0, $size_todo, '');
-    _utf8_off($next_block);
     $self->{size_gotten} += length($next_block);
     if(exists $self->{uncompress}){
         &{$self->{uncompress}}(\$self->{current_data_body}, \$next_block);
