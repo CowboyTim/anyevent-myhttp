@@ -29,6 +29,7 @@ my @data_set = (
     #['GET', 'https://www.google.be/', undef, {Connection => 'close'}],
     #['GET', 'https://www.google.be/', undef, {Connection => 'close'}],
     ['GET', 'https://www.google.be/', undef, {}],
+    ['GET', 'https://www.google.be/', undef, {}],
     #['GET', 'https://www.google.be/', undef, {Connection => 'close', 'Accept-Encoding' => 'gzip'}],
     #['GET', 'http://localhost:8080/', undef, {Connection => 'close', 'Accept-Encoding' => 'gzip'}],
     #['PUT', '/def', encode_json([{abctest => 1}]), {}],
@@ -111,14 +112,16 @@ use AnyEvent::Log;
 sub new {
     my ($class, $state) = @_;
 
+    my $self = bless $state, ref($class)||$class;
+
     # get an entry
-    schedule_next($state);
+    $self->schedule_next();
 
     # make the handle
     my $hdl = new AnyEvent::Handle(
-        connect => [$state->{request_host}, $state->{request_port}],
-        ($state->{request_protocol} eq 'https'?(
-            tls_ctx => $state->{tls_ctx},
+        connect => [$self->{request_host}, $self->{request_port}],
+        ($self->{request_protocol} eq 'https'?(
+            tls_ctx => $self->{tls_ctx},
             tls     => 'connect'
         ):()),
         on_connect => sub {
@@ -126,22 +129,21 @@ sub new {
             AE::log info => "CONNECT:$hdl->{peername},$host:$port";
         }
     );
-    $state->{hdl} = $hdl;
+    $self->{hdl} = $hdl;
     $hdl->on_read(sub {
         my ($hdl) = @_;
         AE::log debug => "on_read() called";
-        &{$state->{request_cb}}($state);
+        &{$self->{request_cb}}($self);
     });
     my $disconnect = sub {
         my ($hdl, $fatal, $msg) = @_;
         $hdl->destroy();
-        if(($state->{response_headers}{Connection} // '') eq 'close'){
-            &{$state->{consumer}}(
-                delete @{$state}{qw(response_status_code response_status_message current_data_body)}
+        if(($self->{response_headers}{Connection} // '') eq 'close'){
+            &{$self->{consumer}}(
+                delete @{$self}{qw(response_status_code response_status_message current_data_body)}
             );
-            #_init($state);
         }
-        ${$state->{cv}}->send();
+        ${$self->{cv}}->send();
     };
     $hdl->on_error(sub {
         my ($hdl, $fatal, $msg) = @_;
@@ -151,17 +153,17 @@ sub new {
     $hdl->on_eof($disconnect);
     $hdl->on_drain(sub {
         my ($hdl) = @_;
-        &{$state->{next_cb}}($state);
+        &{$self->{next_cb}}($self);
     });
 
-    return bless $state, ref($class)||$class;
+    return $self;
 }
 
 sub send_data {
     my ($self) = @_;
     my $str = substr($self->{request_data}, 0, 10_000_000, '');
     unless (length($str)){
-        $self->{next_cb} = \&schedule_next;
+        $self->{next_cb} = sub {$self->schedule_next()};
         $self->{hdl}->on_drain(undef);
         return 0;
     }
@@ -365,7 +367,7 @@ sub chunked_body_reader {
 sub _init {
     my ($self) = @_;
     my $hdl = $self->{hdl};
-    schedule_next($self);
+    $self->schedule_next();
     $hdl->on_drain(sub {
         my ($hdl) = @_;
         AE::log debug => "_init(): called next_cb";
