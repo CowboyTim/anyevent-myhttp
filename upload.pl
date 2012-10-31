@@ -316,7 +316,7 @@ sub body_reader {
         &{$self->{consumer}}(
             delete @{$self}{qw(response_status_code response_status_message current_data_body)}
         );
-        _init($self);
+        $self->_init();
         return length($hdl->rbuf);
     }
     return 0;
@@ -355,7 +355,7 @@ sub chunked_body_reader {
             &{$self->{consumer}}(
                 delete @{$self}{qw(response_status_code response_status_message current_data_body)}
             );
-            _init($self);
+            $self->_init();
         }
         return length($hdl->rbuf);
     }
