@@ -27,8 +27,8 @@ my @data_set = (
     #['GET', 'http://www.facebook.com/', undef, {Connection => 'close'}],
     #['GET', 'http://www.deredactie.be/', undef, {Connection => 'close', }],
     #['GET', 'https://www.google.be/', undef, {Connection => 'close'}],
-    #['GET', 'https://www.google.be/', undef, {Connection => 'close'}],
-    ['GET', 'https://www.google.com/', undef, {}],
+    ['GET', 'https://www.google.com/', undef, {Connection => 'close'}],
+    #['GET', 'https://www.google.com/', undef, {}],
     #['GET', 'https://www.google.be/', undef, {}],
     #['GET', 'https://www.google.be/', undef, {Connection => 'close', 'Accept-Encoding' => 'gzip'}],
     #['GET', 'http://localhost:8080/', undef, {Connection => 'close', 'Accept-Encoding' => 'gzip'}],
@@ -43,6 +43,7 @@ while(@data_set){
     while(scalar(@handles) < 1 and @data_set){
         AE::log info => "NEW:".scalar(@handles);
         my $hdl = AE::HTTP->new({
+            requests => \@data_set,
             # producer
             producer => sub {
                 AE::log info => "SEND:".scalar(@data_set);
@@ -52,23 +53,13 @@ while(@data_set){
             },
             # consumer
             consumer => sub {
-                my ($response) = @_;
-                my ($code, $msg, $body, $headers) = @{$response}{qw(
-                    response_status_code
-                    response_status_message
-                    current_data_body
-                    response_headers
-                )};
+                my ($code, $msg, $body, $headers) = @_;
                 AE::log info => "CONSUMER LEFT:".scalar(@data_set);
                 $data_sent++;
                 AE::log info =>
                     "OK:$data_sent, $orig_set_size, ".
                     "response body:".($body//'<undef>').", status: $code, msg: ".($msg//'');
                 print $body if defined $body;
-                if(defined $code and $code eq '302'){
-                    # redirect
-                    unshift @data_set, ['GET', $headers->{Location}, undef, $response->{headers}];
-                }
                 if(scalar(@data_set) == 0 and $data_sent == $orig_set_size){
                     AE::log info => "END OK:$data_sent, $orig_set_size, ".scalar(@data_set);
                     ${$cv}->send();
@@ -100,7 +91,7 @@ while(@data_set){
     AE::log info => "WAIT:".scalar(@handles);
     $$cv->recv();
     @handles = grep {!$_->{hdl}->destroyed()} @handles;
-    AE::log info => "LOOP:".scalar(@handles);
+    AE::log info => "LOOP:".scalar(@handles).",DATA_SET:".scalar(@data_set);
 }
 AE::log info => "LOOP END:".scalar(@handles);
 
@@ -113,7 +104,6 @@ use Errno;
 use IO::Socket::SSL;
 use Data::Dumper;
 use IO::Uncompress::Gunzip qw(gunzip);
-use IO::Uncompress::Bunzip2 qw(bunzip2);
 
 use AnyEvent::Socket;
 use AnyEvent::Handle;
@@ -147,9 +137,10 @@ sub new {
     });
     my $disconnect = sub {
         my ($hdl, $fatal, $msg) = @_;
+        AE::log info => "DISCONNECT";
         $hdl->destroy();
         if(($self->{response_headers}{Connection} // '') eq 'close'){
-            &{$self->{consumer}}($self);
+            $self->consume_next();
         }
         ${$self->{cv}}->send();
     };
@@ -161,10 +152,33 @@ sub new {
     $hdl->on_eof($disconnect);
     $hdl->on_drain(sub {
         my ($hdl) = @_;
+        AE::log debug => "on_drain(): called next_cb";
         &{$self->{next_cb}}($self);
     });
 
     return $self;
+}
+
+sub consume_next {
+    my ($self) = @_;
+    my ($code, $msg, $body, $headers) = @{$self}{qw(
+        response_status_code
+        response_status_message
+        current_data_body
+        response_headers
+    )};
+    if(defined $code and $code eq '302'){
+        AE::log info => "REDIRECT: $code";
+        # redirect: make a new request at the start of the queue
+        unshift @{$self->{requests}}, ['GET', $headers->{Location}, undef, $self->{headers}];
+    }
+    &{$self->{consumer}}($code, $msg, $body, $headers);
+    $self->schedule_next();
+    $self->{hdl}->on_drain(sub {
+        my ($hdl) = @_;
+        AE::log debug => "on_drain(): called next_cb";
+        &{$self->{next_cb}}($self);
+    });
 }
 
 sub send_data {
@@ -189,6 +203,7 @@ sub schedule_next {
     %{$self} = (
         producer      => $self->{producer},
         consumer      => $self->{consumer},
+        requests      => $self->{requests},
         error_handler => $self->{error_handler},
         cv            => $self->{cv},
         headers       => $self->{headers},
@@ -269,14 +284,7 @@ sub read_response_headers {
                 $self->{size_wanted} = $rh->{"Content-Length"};
                 $self->{request_cb}  = \&body_reader;
             } else {
-                if($chunked){
-                    $self->{request_cb} = \&chunked_body_reader;
-                } else {
-                    $self->{current_data_body} = '';
-                    $self->{size_gotten} = 0;
-                    $self->{size_wanted} = $rh->{"Content-Length"};
-                    $self->{request_cb}  = \&body_reader;
-                }
+                $self->{request_cb} = \&chunked_body_reader;
             }
 
             # add a uncompressor if wanted
@@ -323,8 +331,7 @@ sub body_reader {
     if(!defined $size){
         return 0
     } elsif ($self->{size_gotten} >= $size){
-        &{$self->{consumer}}($self);
-        $self->_init();
+        $self->consume_next();
         return length($hdl->rbuf);
     }
     return 0;
@@ -360,22 +367,9 @@ sub chunked_body_reader {
             $self->{chunk_wanted_size} = $size;
             $self->{request_cb} = \&chunk_reader;
         } else {
-            &{$self->{consumer}}($self);
-            $self->_init();
+            $self->consume_next();
         }
         return length($hdl->rbuf);
     }
     return 0;
 }
-
-sub _init {
-    my ($self) = @_;
-    my $hdl = $self->{hdl};
-    $self->schedule_next();
-    $hdl->on_drain(sub {
-        my ($hdl) = @_;
-        AE::log debug => "_init(): called next_cb";
-        &{$self->{next_cb}}($self);
-    });
-}
-
