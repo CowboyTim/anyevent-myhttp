@@ -168,22 +168,10 @@ sub send_data {
     return 1;
 }
 
-sub get_next {
+sub schedule_next {
     my ($self) = @_;
     my $data = &{$self->{producer}}();
     unless(defined $data){
-        return;
-    }
-    my $uri = URI->new($data->[1]);
-    AE::log info => "$data->[0] ".$uri->as_string();
-    #$uri->query_form(map {$_, $params->{$_}} grep {defined $params->{$_}} keys %{$params});
-    return $data->[0], $data->[2], $uri->host(), $uri->port(), $uri->scheme(), $uri->as_string(), $data->[3];
-}
-
-sub schedule_next {
-    my ($self) = @_;
-    my ($method, $body, $host, $port, $scheme, $path, $headers) = get_next($self);
-    unless($method){
         ${$self->{cv}}->send();
         return 0;
     }
@@ -198,16 +186,20 @@ sub schedule_next {
         hdl           => $self->{hdl},
     );
 
+    my $uri = URI->new($data->[1]);
+    AE::log info => "$data->[0] ".$uri->as_string();
+    #$uri->query_form(map {$_, $params->{$_}} grep {defined $params->{$_}} keys %{$params});
+
     # start new
     $self->{request_cb}      = \&read_response_status;
     $self->{next_cb}         = \&send_request;
-    $self->{request_method}  = $method;
-    $self->{request_data}    = $body // '';
-    $self->{request_headers} = $headers;
-    $self->{request_host}    = $host;
-    $self->{request_port}    = $port;
-    $self->{request_protocol}= $scheme;
-    $self->{request_path}    = $path;
+    $self->{request_method}  = $data->[0];
+    $self->{request_data}    = $data->[2] // '';
+    $self->{request_headers} = $data->[3];
+    $self->{request_host}    = $uri->host();
+    $self->{request_port}    = $uri->port();
+    $self->{request_protocol}= $uri->scheme();
+    $self->{request_path}    = $uri->as_string();
 
     # add some headers
     $self->{request_headers}{'Content-Length'} = length($self->{request_data});
@@ -215,7 +207,7 @@ sub schedule_next {
     $self->{request_headers}{'Host'} .= ":$self->{request_port}"
         if ($self->{request_port}//'') ne '80';
 
-    AE::log debug => "schedule_next: $method $host $path";
+    AE::log debug => "schedule_next: $self->{request_protocol}://$self->{request_host}:$self->{request_port}/$self->{request_path}";
     return 1;
 }
 
