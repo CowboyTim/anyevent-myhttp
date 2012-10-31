@@ -28,8 +28,8 @@ my @data_set = (
     #['GET', 'http://www.deredactie.be/', undef, {Connection => 'close', }],
     #['GET', 'https://www.google.be/', undef, {Connection => 'close'}],
     #['GET', 'https://www.google.be/', undef, {Connection => 'close'}],
-    ['GET', 'https://www.google.be/', undef, {}],
-    ['GET', 'https://www.google.be/', undef, {}],
+    ['GET', 'https://www.google.com/', undef, {}],
+    #['GET', 'https://www.google.be/', undef, {}],
     #['GET', 'https://www.google.be/', undef, {Connection => 'close', 'Accept-Encoding' => 'gzip'}],
     #['GET', 'http://localhost:8080/', undef, {Connection => 'close', 'Accept-Encoding' => 'gzip'}],
     #['PUT', '/def', encode_json([{abctest => 1}]), {}],
@@ -52,13 +52,23 @@ while(@data_set){
             },
             # consumer
             consumer => sub {
-                my ($code, $msg, $response) = @_;
+                my ($response) = @_;
+                my ($code, $msg, $body, $headers) = @{$response}{qw(
+                    response_status_code
+                    response_status_message
+                    current_data_body
+                    response_headers
+                )};
                 AE::log info => "CONSUMER LEFT:".scalar(@data_set);
                 $data_sent++;
                 AE::log info =>
                     "OK:$data_sent, $orig_set_size, ".
-                    "response body:".($response//'<undef>').", status: $code, msg: ".($msg//'');
-                print $response if defined $response;
+                    "response body:".($body//'<undef>').", status: $code, msg: ".($msg//'');
+                print $body if defined $body;
+                if(defined $code and $code eq '302'){
+                    # redirect
+                    unshift @data_set, ['GET', $headers->{Location}, undef, $response->{headers}];
+                }
                 if(scalar(@data_set) == 0 and $data_sent == $orig_set_size){
                     AE::log info => "END OK:$data_sent, $orig_set_size, ".scalar(@data_set);
                     ${$cv}->send();
@@ -139,9 +149,7 @@ sub new {
         my ($hdl, $fatal, $msg) = @_;
         $hdl->destroy();
         if(($self->{response_headers}{Connection} // '') eq 'close'){
-            &{$self->{consumer}}(
-                delete @{$self}{qw(response_status_code response_status_message current_data_body)}
-            );
+            &{$self->{consumer}}($self);
         }
         ${$self->{cv}}->send();
     };
@@ -209,7 +217,7 @@ sub schedule_next {
     $self->{request_headers}{'Host'} .= ":$self->{request_port}"
         if ($self->{request_port}//'') ne '80';
 
-    AE::log debug => "schedule_next: $self->{request_protocol}://$self->{request_host}:$self->{request_port}/$self->{request_path}";
+    AE::log debug => "schedule_next: $self->{request_protocol}://$self->{request_host}:$self->{request_port} [$self->{request_path}]";
     return 1;
 }
 
@@ -315,9 +323,7 @@ sub body_reader {
     if(!defined $size){
         return 0
     } elsif ($self->{size_gotten} >= $size){
-        &{$self->{consumer}}(
-            delete @{$self}{qw(response_status_code response_status_message current_data_body)}
-        );
+        &{$self->{consumer}}($self);
         $self->_init();
         return length($hdl->rbuf);
     }
@@ -354,9 +360,7 @@ sub chunked_body_reader {
             $self->{chunk_wanted_size} = $size;
             $self->{request_cb} = \&chunk_reader;
         } else {
-            &{$self->{consumer}}(
-                delete @{$self}{qw(response_status_code response_status_message current_data_body)}
-            );
+            &{$self->{consumer}}($self);
             $self->_init();
         }
         return length($hdl->rbuf);
