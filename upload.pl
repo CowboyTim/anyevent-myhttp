@@ -27,8 +27,8 @@ my @data_set = (
     #['GET', 'http://www.facebook.com/', undef, {Connection => 'close'}],
     #['GET', 'http://www.deredactie.be/', undef, {Connection => 'close', }],
     #['GET', 'https://www.google.be/', undef, {Connection => 'close'}],
-    ['GET', 'https://www.google.com/', undef, {Connection => 'close'}],
-    #['GET', 'https://www.google.com/', undef, {}],
+    #['GET', 'https://www.google.com/', undef, {Connection => 'close'}],
+    ['GET', 'https://www.google.com/', undef, {}],
     #['GET', 'https://www.google.be/', undef, {}],
     #['GET', 'https://www.google.be/', undef, {Connection => 'close', 'Accept-Encoding' => 'gzip'}],
     #['GET', 'http://localhost:8080/', undef, {Connection => 'close', 'Accept-Encoding' => 'gzip'}],
@@ -40,7 +40,7 @@ my $orig_set_size = scalar(@data_set);
 my @handles;
 while(@data_set){
     my $cv = \AE::cv();
-    while(scalar(@handles) < 2 and @data_set){
+    while(scalar(@handles) < 1 and @data_set){
         AE::log info => "NEW:".scalar(@handles);
         my $hdl = AE::HTTP->new({
             requests => \@data_set,
@@ -164,7 +164,7 @@ sub consume_next {
     my ($code, $msg, $body, $headers) = @{$self}{qw(
         response_status_code
         response_status_message
-        current_data_body
+        data_body
         response_headers
     )};
     if(defined $code and $code eq '302'){
@@ -289,27 +289,15 @@ sub read_response_headers {
             # regular one
             my $chunked = ($rh->{"Transfer-Encoding"}//'') =~ /\bchunked\b/i;
             if(!$chunked){
-                $self->{current_data_body} = '';
+                $self->{data_body}   = '';
                 $self->{size_gotten} = 0;
-                $self->{size_wanted} = $rh->{"Content-Length"};
+                $self->{size_wanted} = $rh->{'Content-Length'};
                 $self->{request_cb}  = \&body_reader;
             } else {
-                $self->{request_cb} = \&chunked_body_reader;
+                $self->{request_cb}  = \&chunked_body_reader;
             }
 
-            # add a uncompressor if wanted
-            if($rh->{"Content-Encoding"} ~~ 'gzip'){
-                my $dbuf = '';
-                $self->{uncompress} = sub {
-                    my ($buf, $input) = @_;
-                    $dbuf .= $$input;
-                    AE::log debug => Dumper($input);
-                    gunzip(\$dbuf => \$self->{current_data_body}, TrailingData => \my $abc);
-                    AE::log debug =>
-                        "UNCOMPRESS LEFT:".length($abc//'').", buffer: ".length($dbuf).
-                        ", length output:".length($self->{current_data_body});
-                };
-            }
+            $self->{handle_body} = \&{'handle_body'.($rh->{'Content-Encoding'}//'')};
 
         } else {
             if(my ($h, $v) = ($line =~ m/^(.*?): (.*)/)){
@@ -321,6 +309,21 @@ sub read_response_headers {
         return length($hdl->rbuf);
     }
     return 0;
+}
+
+sub handle_body {
+    my ($self, $buf, $input) = @_;
+    $$buf .= $$input;
+}
+
+sub handle_bodygzip {
+    my ($self, $buf, $input, $dbuf) = @_;
+    $$dbuf .= $$input;
+    AE::log debug => Dumper($input);
+    gunzip($dbuf => $buf, TrailingData => \my $abc);
+    AE::log debug =>
+        "UNCOMPRESS LEFT:".length($abc//'').", buffer: ".length($$dbuf).
+        ", length output:".length($$buf);
 }
 
 sub body_reader {
@@ -336,11 +339,7 @@ sub body_reader {
     AE::log debug => "BODY_READER>>$size_todo got allready $self->{size_gotten}";
     my $next_block = substr($hdl->{rbuf}, 0, $size_todo, '');
     $self->{size_gotten} += length($next_block);
-    if(exists $self->{uncompress}){
-        &{$self->{uncompress}}(\$self->{current_data_body}, \$next_block);
-    } else {
-        $self->{current_data_body} .= $next_block;
-    }
+    &{$self->{handle_body}}($self, \$self->{data_body}, \$next_block, \$self->{_scratch});
     if(!defined $size){
         return 0
     } elsif ($self->{size_gotten} >= $size){
@@ -359,7 +358,7 @@ sub chunk_reader {
     my $size_todo = $size - length($self->{current_chunk}//'');
     $self->{current_chunk} .= substr($hdl->{rbuf}, 0, $size_todo, '');
     if(length($self->{current_chunk}) >= $size){
-        $self->{current_data_body} .= delete $self->{current_chunk};
+        $self->{data_body} .= delete $self->{current_chunk};
         $self->{request_cb} = \&chunked_body_reader;
         return length($hdl->rbuf);
     }
