@@ -27,6 +27,8 @@ my @data_set = (
     #['GET', 'http://www.facebook.com/', undef, {Connection => 'close'}],
     #['GET', 'http://www.deredactie.be/', undef, {Connection => 'close', }],
     #['GET', 'https://www.google.be/', undef, {Connection => 'close'}],
+    #['GET', 'https://www.google.com/', undef, {Connection => 'close'}],
+    ['GET', 'https://www.google.com/', undef, {Connection => 'close'}],
     ['GET', 'https://www.google.com/', undef, {Connection => 'close'}],
     #['GET', 'https://www.google.com/', undef, {}],
     #['GET', 'https://www.google.be/', undef, {}],
@@ -40,7 +42,7 @@ my $orig_set_size = scalar(@data_set);
 my @handles;
 while(@data_set){
     my $cv = \AE::cv();
-    while(scalar(@handles) < 1 and @data_set){
+    while(scalar(@handles) < 2 and @data_set){
         AE::log info => "NEW:".scalar(@handles);
         my $hdl = AE::HTTP->new({
             requests => \@data_set,
@@ -64,10 +66,6 @@ while(@data_set){
                     AE::log info => "END OK:$data_sent, $orig_set_size, ".scalar(@data_set);
                     ${$cv}->send();
                 }
-            },
-            # error: put back in queue
-            error_handler => sub {
-                unshift @data_set, $_[0];
             },
             # condvar
             cv => $cv,
@@ -139,6 +137,11 @@ sub new {
         my ($hdl, $fatal, $msg) = @_;
         AE::log info => "DISCONNECT";
         $hdl->destroy();
+
+        # 'close' Connections that have no Content-Length set will just
+        # disconnect instead of letting the condition be true in
+        # body_reader(), hence we do a consume_next(). *Sigh* HTTP
+        # sucks.
         if(($self->{response_headers}{Connection} // '') eq 'close'){
             $self->consume_next();
         }
@@ -168,11 +171,25 @@ sub consume_next {
         response_headers
     )};
     if(defined $code and $code eq '302'){
-        AE::log info => "REDIRECT: $code";
+        AE::log info => "REDIRECT: $code ['GET', $headers->{Location}, undef, '<HEADERS>']";
         # redirect: make a new request at the start of the queue
-        unshift @{$self->{requests}}, ['GET', $headers->{Location}, undef, $self->{headers}];
+        unshift @{$self->{requests}}, ['GET', $headers->{Location}, undef, $self->{request_headers}];
+    } else {
+        &{$self->{consumer}}($code, $msg, $body, $headers);
     }
-    &{$self->{consumer}}($code, $msg, $body, $headers);
+}
+
+sub get_next {
+    my ($self) = @_;
+    # delete the response headers, else a redirect ends up double when a
+    # 'close' Connection happens because of the disconnect also doing a
+    # consume_next().
+    my $resp_headers = delete $self->{response_headers};
+
+    # return when it was a 'close' Connection
+    return if $resp_headers and ($resp_headers->{Connection} // '') eq 'close';
+
+    # schedule next, make on_drain() produce data again!
     $self->schedule_next();
     $self->{hdl}->on_drain(sub {
         my ($hdl) = @_;
@@ -201,14 +218,13 @@ sub schedule_next {
     }
 
     %{$self} = (
-        producer      => $self->{producer},
-        consumer      => $self->{consumer},
-        requests      => $self->{requests},
-        error_handler => $self->{error_handler},
-        cv            => $self->{cv},
-        headers       => $self->{headers},
-        tls_ctx       => $self->{tls_ctx},
-        hdl           => $self->{hdl},
+        producer => $self->{producer},
+        consumer => $self->{consumer},
+        requests => $self->{requests},
+        cv       => $self->{cv},
+        headers  => $self->{headers},
+        tls_ctx  => $self->{tls_ctx},
+        hdl      => $self->{hdl},
     );
 
     my $uri = URI->new($data->[1]);
@@ -232,7 +248,9 @@ sub schedule_next {
     $self->{request_headers}{'Host'} .= ":$self->{request_port}"
         if ($self->{request_port}//'') ne '80';
 
-    AE::log debug => "schedule_next: $self->{request_protocol}://$self->{request_host}:$self->{request_port} [$self->{request_path}]";
+    AE::log debug =>
+        "schedule_next: $self->{request_protocol}://$self->{request_host}:".
+        "$self->{request_port} [$self->{request_path}]";
     return 1;
 }
 
@@ -295,7 +313,9 @@ sub read_response_headers {
                     $dbuf .= $$input;
                     AE::log debug => Dumper($input);
                     gunzip(\$dbuf => \$self->{current_data_body}, TrailingData => \my $abc);
-                    AE::log debug => "UNCOMPRESS LEFT:".length($abc//'').", buffer: ".length($dbuf).", length output:".length($self->{current_data_body});
+                    AE::log debug =>
+                        "UNCOMPRESS LEFT:".length($abc//'').", buffer: ".length($dbuf).
+                        ", length output:".length($self->{current_data_body});
                 };
             }
 
@@ -321,6 +341,7 @@ sub body_reader {
     } else {
         $size_todo = length($hdl->{rbuf});
     }
+    AE::log debug => "BODY_READER>>$size_todo got allready $self->{size_gotten}";
     my $next_block = substr($hdl->{rbuf}, 0, $size_todo, '');
     $self->{size_gotten} += length($next_block);
     if(exists $self->{uncompress}){
@@ -332,6 +353,7 @@ sub body_reader {
         return 0
     } elsif ($self->{size_gotten} >= $size){
         $self->consume_next();
+        $self->get_next();
         return length($hdl->rbuf);
     }
     return 0;
@@ -368,6 +390,7 @@ sub chunked_body_reader {
             $self->{request_cb} = \&chunk_reader;
         } else {
             $self->consume_next();
+            $self->get_next();
         }
         return length($hdl->rbuf);
     }
