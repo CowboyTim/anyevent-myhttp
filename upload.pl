@@ -96,8 +96,6 @@ package AE::HTTP;
 use strict; use warnings;
 
 use URI;
-use Errno;
-use IO::Socket::SSL;
 use Data::Dumper;
 use IO::Uncompress::Gunzip qw(gunzip);
 
