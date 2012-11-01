@@ -241,8 +241,7 @@ sub schedule_next {
     # add some headers
     $self->{request_headers}{'Content-Length'} = length($self->{request_data});
     $self->{request_headers}{'Host'}  = $uri->host();
-    $self->{request_headers}{'Host'} .= ":$self->{request_port}"
-        if ($self->{request_port}//'') ne '80';
+    $self->{request_headers}{'Host'} .= ':'.$uri->port() if ($uri->port()//'') ne '80';
 
     AE::log debug => "schedule_next: ".$uri->as_string();
     return 1;
@@ -253,9 +252,10 @@ sub send_request {
     $self->{next_cb} = \&send_data;
 
     my %hdr = (%{$self->{headers}}, %{$self->{request_headers}//{}});
-    my $buf = "$self->{request_method} ".$self->{uri}->as_string()." HTTP/1.1\r\n"
-         . join('', map "\u$_: $hdr{$_}\r\n", grep defined $hdr{$_}, keys %hdr)
-         . "\r\n";
+    my $buf = join("\r\n",
+        "$self->{request_method} ".$self->{uri}->as_string()." HTTP/1.1",
+        (map {"\u$_: $hdr{$_}"} grep {defined $hdr{$_}} keys %hdr),
+    )."\r\n\r\n";
     AE::log debug => "send_request: $buf";
     $self->{hdl}->push_write($buf);
     return 0;
