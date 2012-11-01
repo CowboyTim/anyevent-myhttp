@@ -27,8 +27,6 @@ my @data_set = (
     #['GET', 'http://www.facebook.com/', undef, {Connection => 'close'}],
     #['GET', 'http://www.deredactie.be/', undef, {Connection => 'close', }],
     #['GET', 'https://www.google.be/', undef, {Connection => 'close'}],
-    #['GET', 'https://www.google.com/', undef, {Connection => 'close'}],
-    ['GET', 'https://www.google.com/', undef, {Connection => 'close'}],
     ['GET', 'https://www.google.com/', undef, {Connection => 'close'}],
     #['GET', 'https://www.google.com/', undef, {}],
     #['GET', 'https://www.google.be/', undef, {}],
@@ -116,9 +114,10 @@ sub new {
     $self->schedule_next();
 
     # make the handle
+    my $uri = $self->{uri};
     my $hdl = new AnyEvent::Handle(
-        connect => [$self->{request_host}, $self->{request_port}],
-        ($self->{request_protocol} eq 'https'?(
+        connect => [$uri->host(), $uri->port()],
+        ($uri->scheme() eq 'https'?(
             tls_ctx => $self->{tls_ctx},
             tls     => 'connect'
         ):()),
@@ -237,20 +236,15 @@ sub schedule_next {
     $self->{request_method}  = $data->[0];
     $self->{request_data}    = $data->[2] // '';
     $self->{request_headers} = $data->[3];
-    $self->{request_host}    = $uri->host();
-    $self->{request_port}    = $uri->port();
-    $self->{request_protocol}= $uri->scheme();
-    $self->{request_path}    = $uri->as_string();
+    $self->{uri}             = $uri;
 
     # add some headers
     $self->{request_headers}{'Content-Length'} = length($self->{request_data});
-    $self->{request_headers}{'Host'}  = $self->{request_host};
+    $self->{request_headers}{'Host'}  = $uri->host();
     $self->{request_headers}{'Host'} .= ":$self->{request_port}"
         if ($self->{request_port}//'') ne '80';
 
-    AE::log debug =>
-        "schedule_next: $self->{request_protocol}://$self->{request_host}:".
-        "$self->{request_port} [$self->{request_path}]";
+    AE::log debug => "schedule_next: ".$uri->as_string();
     return 1;
 }
 
@@ -259,7 +253,7 @@ sub send_request {
     $self->{next_cb} = \&send_data;
 
     my %hdr = (%{$self->{headers}}, %{$self->{request_headers}//{}});
-    my $buf = "$self->{request_method} $self->{request_path} HTTP/1.1\r\n"
+    my $buf = "$self->{request_method} ".$self->{uri}->as_string()." HTTP/1.1\r\n"
          . join('', map "\u$_: $hdr{$_}\r\n", grep defined $hdr{$_}, keys %hdr)
          . "\r\n";
     AE::log debug => "send_request: $buf";
