@@ -28,9 +28,9 @@ my @data_set = (
     #['GET', 'http://www.deredactie.be/', undef, {Connection => 'close', }],
     #['GET', 'https://www.google.be/', undef, {Connection => 'close'}],
     #['GET', 'https://www.google.com/', undef, {Connection => 'close'}],
-    ['GET', 'https://www.google.com/', undef, {}],
+    #['GET', 'https://www.google.com/', undef, {}],
     #['GET', 'https://www.google.be/', undef, {}],
-    #['GET', 'https://www.google.be/', undef, {Connection => 'close', 'Accept-Encoding' => 'gzip'}],
+    ['GET', 'https://www.google.be/', undef, {Connection => 'close', 'Accept-Encoding' => 'gzip'}],
     #['GET', 'http://localhost:8080/', undef, {Connection => 'close', 'Accept-Encoding' => 'gzip'}],
     #['PUT', '/def', encode_json([{abctest => 1}]), {}],
 );
@@ -297,8 +297,10 @@ sub read_response_headers {
                 $self->{request_cb}  = \&chunked_body_reader;
             }
 
-            $self->{handle_body} = \&{'handle_body'.($rh->{'Content-Encoding'}//'')};
-
+            $self->{handle_body} = \&{'handle_body_'.(
+                 $rh->{'Content-Encoding'} ~~ ['gzip'] # to be extended
+                ?$rh->{'Content-Encoding'}:''
+            )};
         } else {
             if(my ($h, $v) = ($line =~ m/^(.*?): (.*)/)){
                 $self->{response_headers}{$h} = $v;
@@ -311,12 +313,12 @@ sub read_response_headers {
     return 0;
 }
 
-sub handle_body {
+sub handle_body_ {
     my ($self, $buf, $input) = @_;
     $$buf .= $$input;
 }
 
-sub handle_bodygzip {
+sub handle_body_gzip {
     my ($self, $buf, $input, $dbuf) = @_;
     $$dbuf .= $$input;
     AE::log debug => Dumper($input);
