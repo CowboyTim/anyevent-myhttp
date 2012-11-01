@@ -29,8 +29,10 @@ my @data_set = (
     #['GET', 'https://www.google.be/', undef, {Connection => 'close'}],
     #['GET', 'https://www.google.com/', undef, {Connection => 'close'}],
     #['GET', 'https://www.google.com/', undef, {}],
+    ['GET', 'https://www.google.be/', undef, {'TE' => 'chunked'}],
+    #['GET', 'https://www.google.be/', undef, {'Accept-Encoding' => 'gzip', 'TE' => 'chunked'}],
     #['GET', 'https://www.google.be/', undef, {}],
-    ['GET', 'https://www.google.be/', undef, {Connection => 'close', 'Accept-Encoding' => 'gzip'}],
+    #['GET', 'https://www.google.be/', undef, {Connection => 'close', 'Accept-Encoding' => 'gzip'}],
     #['GET', 'http://localhost:8080/', undef, {Connection => 'close', 'Accept-Encoding' => 'gzip'}],
     #['PUT', '/def', encode_json([{abctest => 1}]), {}],
 );
@@ -360,7 +362,7 @@ sub chunk_reader {
     my $size_todo = $size - length($self->{current_chunk}//'');
     $self->{current_chunk} .= substr($hdl->{rbuf}, 0, $size_todo, '');
     if(length($self->{current_chunk}) >= $size){
-        $self->{data_body} .= delete $self->{current_chunk};
+        &{$self->{handle_body}}($self, \$self->{data_body}, \delete $self->{current_chunk}, \$self->{_scratch});
         $self->{request_cb} = \&chunked_body_reader;
         return length($hdl->rbuf);
     }
