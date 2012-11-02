@@ -29,7 +29,8 @@ my @data_set = (
     #['GET', 'https://www.google.be/', undef, {Connection => 'close'}],
     #['GET', 'https://www.google.com/', undef, {Connection => 'close'}],
     #['GET', 'https://www.google.com/', undef, {}],
-    ['GET', 'https://www.google.be/', undef, {'TE' => 'chunked'}],
+    ['HEAD', 'https://www.google.com/', undef, {'TE' => 'chunked'}],
+    #['HEAD', 'https://www.google.be/', undef, {'TE' => 'chunked'}],
     #['GET', 'https://www.google.be/', undef, {'Accept-Encoding' => 'gzip', 'TE' => 'chunked'}],
     #['GET', 'https://www.google.be/', undef, {}],
     #['GET', 'https://www.google.be/', undef, {Connection => 'close', 'Accept-Encoding' => 'gzip'}],
@@ -170,9 +171,9 @@ sub consume_next {
         response_headers
     )};
     if(defined $code and $code eq '302'){
-        AE::log info => "REDIRECT: $code ['GET', $headers->{Location}, undef, '<HEADERS>']";
+        AE::log info => "REDIRECT: $code [$self->{request_method}, $headers->{Location}, undef, '<HEADERS>']";
         # redirect: make a new request at the start of the queue
-        unshift @{$self->{requests}}, ['GET', $headers->{Location}, undef, $self->{request_headers}];
+        unshift @{$self->{requests}}, [$self->{request_method}, $headers->{Location}, undef, $self->{request_headers}];
     } else {
         &{$self->{consumer}}($code, $msg, $body, $headers);
     }
@@ -286,6 +287,13 @@ sub read_response_headers {
         if(length($line) == 0){
             my $rh = $self->{response_headers};
             AE::log debug => Dumper($rh);
+
+            # if it was just a HEAD request, exit and take the next one.
+            if ($self->{request_method} eq 'HEAD'){
+                $self->consume_next();
+                $self->get_next();
+                return length($hdl->rbuf);
+            }
 
             # if chunked, use the chunked body reader, else just the
             # regular one
