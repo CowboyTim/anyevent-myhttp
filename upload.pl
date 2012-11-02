@@ -289,7 +289,7 @@ sub read_response_headers {
             AE::log debug => Dumper($rh);
 
             # if it was just a HEAD request, exit and take the next one.
-            if ($self->{request_method} eq 'HEAD'){
+            if ($self->{request_method} ~~ ['HEAD', 'DELETE', 'TRACE', 'OPTIONS']){
                 $self->consume_next();
                 $self->get_next();
                 return length($hdl->rbuf);
