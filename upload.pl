@@ -28,8 +28,9 @@ my @data_set = (
     #['GET', 'http://www.deredactie.be/', undef, {Connection => 'close', }],
     #['GET', 'https://www.google.be/', undef, {Connection => 'close'}],
     #['GET', 'https://www.google.com/', undef, {Connection => 'close'}],
-    #['GET', 'https://www.google.com/', undef, {}],
-    ['HEAD', 'https://www.google.com/', undef, {'TE' => 'chunked'}],
+    ['GET', 'https://www.google.com/', undef, {}],
+    ['GET', 'https://www.google.com/', undef, {}],
+    #['HEAD', 'https://www.google.com/', undef, {'TE' => 'chunked'}],
     #['HEAD', 'https://www.google.be/', undef, {'TE' => 'chunked'}],
     #['GET', 'https://www.google.be/', undef, {'Accept-Encoding' => 'gzip', 'TE' => 'chunked'}],
     #['GET', 'https://www.google.be/', undef, {}],
@@ -206,6 +207,7 @@ sub send_data {
         $self->{hdl}->on_drain(undef);
         return 0;
     }
+    $self->{hdl}->push_write($str);
     return 1;
 }
 
