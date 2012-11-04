@@ -29,7 +29,8 @@ my @data_set = (
     #['GET', 'https://www.google.be/', undef, {Connection => 'close'}],
     #['GET', 'https://www.google.com/', undef, {Connection => 'close'}],
     #['GET', 'https://www.google.com/', undef, {}],
-    ['GET', 'https://www.google.com/', undef, {Connection => 'close'}],
+    ['GET', 'https://www.google.com/', undef, {}],
+    ['GET', 'https://www.google.com/', undef, {}],
     #['GET', 'https://www.google.be/', undef, {}],
     #['HEAD', 'https://www.google.com/', undef, {'TE' => 'chunked'}],
     #['HEAD', 'https://www.google.be/', undef, {'TE' => 'chunked'}],
@@ -197,9 +198,9 @@ sub consume_next {
         response_headers
     )};
     if(defined $code and $code eq '302'){
-        AE::log info => "REDIRECT: $code [$self->{request_queue}[0]{method}, $headers->{Location}, undef, '<HEADERS>']";
         # redirect: make a new request at the start of the queue
-        unshift @{$self->{requests}}, [$self->{request_queue}[0]{method}, $headers->{Location}, undef, $self->{request_headers}];
+        unshift @{$self->{requests}}, my $r = [$self->{request_queue}[0]{method}, $headers->{Location}, undef, $self->{request_headers}];
+        AE::log info => "REDIRECT: $code [".join(',', map {$_//'<undef>'} @{$r})."]";
     } else {
         &{$self->{consumer}}($code, $msg, $body, $headers);
     }
