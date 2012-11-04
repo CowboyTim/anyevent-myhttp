@@ -28,8 +28,9 @@ my @data_set = (
     #['GET', 'http://www.deredactie.be/', undef, {Connection => 'close', }],
     #['GET', 'https://www.google.be/', undef, {Connection => 'close'}],
     #['GET', 'https://www.google.com/', undef, {Connection => 'close'}],
-    ['GET', 'https://www.google.com/', undef, {}],
-    ['GET', 'https://www.google.com/', undef, {}],
+    ['GET', 'https://www.google.be/', undef, {}],
+    ['GET', 'https://www.google.be/', undef, {Connection => 'close'}],
+    #['GET', 'https://www.google.be/', undef, {}],
     #['HEAD', 'https://www.google.com/', undef, {'TE' => 'chunked'}],
     #['HEAD', 'https://www.google.be/', undef, {'TE' => 'chunked'}],
     #['GET', 'https://www.google.be/', undef, {'Accept-Encoding' => 'gzip', 'TE' => 'chunked'}],
@@ -66,7 +67,7 @@ while(@data_set){
                 print $body if defined $body;
                 if(scalar(@data_set) == 0 and $data_sent == $orig_set_size){
                     AE::log info => "END OK:$data_sent, $orig_set_size, ".scalar(@data_set);
-                    ${$cv}->send();
+                    #${$cv}->send();
                 }
             },
             # condvar
@@ -115,8 +116,10 @@ sub new {
     # get an entry
     $self->schedule_next();
 
+    $self->{response_reader} = \&read_response_status;
+
     # make the handle
-    my $uri = $self->{uri};
+    my $uri = $self->{current_request}{uri};
     my $hdl = new AnyEvent::Handle(
         connect => [$uri->host(), $uri->port()],
         ($uri->scheme() eq 'https'?(
@@ -132,12 +135,11 @@ sub new {
     $hdl->on_read(sub {
         my ($hdl) = @_;
         AE::log debug => "on_read() called";
-        &{$self->{request_cb}}($self);
+        &{$self->{response_reader}}($self);
     });
     my $disconnect = sub {
         my ($hdl, $fatal, $msg) = @_;
-        AE::log info => "DISCONNECT";
-        $hdl->destroy();
+        AE::log info => "DISCONNECT: left:".length($hdl->rbuf);
 
         # 'close' Connections that have no Content-Length set will just
         # disconnect instead of letting the condition be true in
@@ -146,18 +148,31 @@ sub new {
         if(($self->{response_headers}{Connection} // '') eq 'close'){
             $self->consume_next();
         }
+        if(length($hdl->rbuf)){
+            while(1){
+                my $orig = length($hdl->rbuf);
+                &{$self->{response_reader}}($self);
+                last if $orig == length($hdl->rbuf);
+            }
+        }
+        AE::log info => "DISCONNECT (bis): left:".length($hdl->rbuf);
+        $hdl->destroy();
         ${$self->{cv}}->send();
     };
     $hdl->on_error(sub {
         my ($hdl, $fatal, $msg) = @_;
-        AE::log error => $msg;
+        AE::log error => "on_error: $msg";
         &$disconnect(@_);
     });
-    $hdl->on_eof($disconnect);
+    $hdl->on_eof(sub {
+        my ($hdl, $fatal, $msg) = @_;
+        AE::log error => "on_eof: $msg";
+        &$disconnect(@_);
+    });
     $hdl->on_drain(sub {
         my ($hdl) = @_;
-        AE::log debug => "on_drain(): called next_cb";
-        &{$self->{next_cb}}($self);
+        AE::log debug => "on_drain(): called request_sender";
+        &{$self->{request_sender}}($self);
     });
 
     return $self;
@@ -165,6 +180,7 @@ sub new {
 
 sub consume_next {
     my ($self) = @_;
+    $self->{response_reader} = \&read_response_status;
     my ($code, $msg, $body, $headers) = @{$self}{qw(
         response_status_code
         response_status_message
@@ -190,20 +206,22 @@ sub get_next {
     # return when it was a 'close' Connection
     return if $resp_headers and ($resp_headers->{Connection} // '') eq 'close';
 
+    shift @{$self->{request_queue}};
+
     # schedule next, make on_drain() produce data again!
     $self->schedule_next();
     $self->{hdl}->on_drain(sub {
         my ($hdl) = @_;
-        AE::log debug => "on_drain(): called next_cb";
-        &{$self->{next_cb}}($self);
+        AE::log debug => "on_drain(): called request_sender";
+        &{$self->{request_sender}}($self);
     });
 }
 
 sub send_data {
     my ($self) = @_;
-    my $str = substr($self->{request_data}, 0, 10_000_000, '');
+    my $str = substr($self->{current_request}{data}, 0, 10_000_000, '');
     unless (length($str)){
-        $self->{next_cb} = sub {$self->schedule_next()};
+        $self->{request_sender} = sub {$self->schedule_next()};
         $self->{hdl}->on_drain(undef);
         return 0;
     }
@@ -215,36 +233,27 @@ sub schedule_next {
     my ($self) = @_;
     my $data = &{$self->{producer}}();
     unless(defined $data){
-        ${$self->{cv}}->send();
+        $self->{hdl}->on_drain(undef);
         return 0;
     }
-
-    %{$self} = (
-        producer => $self->{producer},
-        consumer => $self->{consumer},
-        requests => $self->{requests},
-        cv       => $self->{cv},
-        headers  => $self->{headers},
-        tls_ctx  => $self->{tls_ctx},
-        hdl      => $self->{hdl},
-    );
 
     my $uri = URI->new($data->[1]);
     AE::log info => "$data->[0] ".$uri->as_string();
     #$uri->query_form(map {$_, $params->{$_}} grep {defined $params->{$_}} keys %{$params});
 
     # start new
-    $self->{request_cb}      = \&read_response_status;
-    $self->{next_cb}         = \&send_request;
-    $self->{request_method}  = $data->[0];
-    $self->{request_data}    = $data->[2] // '';
-    $self->{request_headers} = $data->[3];
-    $self->{uri}             = $uri;
+    $self->{request_sender} = \&send_request;
+    push @{$self->{request_queue} //= []}, my $r = $self->{current_request} = {
+        method  => $data->[0],
+        data    => $data->[2] // '',
+        headers => $data->[3],
+        uri     => $uri,
+    };
 
     # add some headers
-    $self->{request_headers}{'Content-Length'} = length($self->{request_data});
-    $self->{request_headers}{'Host'}  = $uri->host();
-    $self->{request_headers}{'Host'} .= ':'.$uri->port() if ($uri->port()//'') ne '80';
+    $r->{headers}{'Content-Length'} = length($r->{data});
+    $r->{headers}{'Host'}  = $uri->host();
+    $r->{headers}{'Host'} .= ':'.$uri->port() if ($uri->port()//'') ne '80';
 
     AE::log debug => "schedule_next: ".$uri->as_string();
     return 1;
@@ -252,11 +261,11 @@ sub schedule_next {
 
 sub send_request {
     my ($self) = @_;
-    $self->{next_cb} = \&send_data;
+    $self->{request_sender} = \&send_data;
 
-    my %hdr = (%{$self->{headers}}, %{$self->{request_headers}//{}});
+    my %hdr = (%{$self->{headers}}, %{$self->{current_request}{headers}//{}});
     my $buf = join("\r\n",
-        "$self->{request_method} ".$self->{uri}->as_string()." HTTP/1.1",
+        "$self->{current_request}{method} ".$self->{current_request}{uri}->as_string()." HTTP/1.1",
         (map {"\u$_: $hdr{$_}"} grep {defined $hdr{$_}} keys %hdr),
     )."\r\n\r\n";
     AE::log debug => "send_request: $buf";
@@ -273,7 +282,7 @@ sub read_response_status {
         AE::log info => "RESPONSE: $code, $msg";
         $self->{response_status_code}    = $code;
         $self->{response_status_message} = $msg;
-        $self->{request_cb} = \&read_response_headers;
+        $self->{response_reader} = \&read_response_headers;
         return 1;
     }
     return 0;
@@ -291,7 +300,7 @@ sub read_response_headers {
             AE::log debug => Dumper($rh);
 
             # if it was just a HEAD request, exit and take the next one.
-            if ($self->{request_method} ~~ ['HEAD', 'DELETE', 'TRACE', 'OPTIONS']){
+            if ($self->{request_queue}[0]{method} ~~ ['HEAD', 'DELETE', 'TRACE', 'OPTIONS']){
                 $self->consume_next();
                 $self->get_next();
                 return length($hdl->rbuf);
@@ -304,9 +313,9 @@ sub read_response_headers {
                 $self->{data_body}   = '';
                 $self->{size_gotten} = 0;
                 $self->{size_wanted} = $rh->{'Content-Length'};
-                $self->{request_cb}  = \&body_reader;
+                $self->{response_reader}  = \&body_reader;
             } else {
-                $self->{request_cb}  = \&chunked_body_reader;
+                $self->{response_reader}  = \&chunked_body_reader;
             }
 
             $self->{handle_body} = \&{'handle_body_'.(
@@ -373,7 +382,7 @@ sub chunk_reader {
     $self->{current_chunk} .= substr($hdl->{rbuf}, 0, $size_todo, '');
     if(length($self->{current_chunk}) >= $size){
         &{$self->{handle_body}}($self, \$self->{data_body}, \delete $self->{current_chunk}, \$self->{_scratch});
-        $self->{request_cb} = \&chunked_body_reader;
+        $self->{response_reader} = \&chunked_body_reader;
         return length($hdl->rbuf);
     }
     AE::log debug => "LEFTCHUNK>>".$hdl->rbuf;
@@ -392,7 +401,7 @@ sub chunked_body_reader {
         AE::log debug => "chunk size: hex($1) = $size";
         if($size){
             $self->{chunk_wanted_size} = $size;
-            $self->{request_cb} = \&chunk_reader;
+            $self->{response_reader} = \&chunk_reader;
         } else {
             $self->consume_next();
             $self->get_next();
