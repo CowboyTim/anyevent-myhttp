@@ -133,6 +133,7 @@ sub new {
     );
     $self->{hdl} = $hdl;
     $hdl->on_read(sub {
+        AE::log debug => "on_read";
         $self->_slurp();
     });
     $hdl->on_error(sub {
@@ -175,7 +176,7 @@ sub _disconnect {
 sub _slurp {
     my ($self) = @_;
     my $hdl = $self->{hdl};
-    AE::log debug => "on_read() called";
+    AE::log debug => "_slurp() called:".length($hdl->rbuf);
     while(my $orig = length($hdl->rbuf)){
         &{$self->{response_reader}}($self);
         last if $orig == length($hdl->rbuf);
