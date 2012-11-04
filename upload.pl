@@ -176,8 +176,7 @@ sub _slurp {
     my ($self) = @_;
     my $hdl = $self->{hdl};
     AE::log debug => "on_read() called";
-    while(length($hdl->rbuf)){
-        my $orig = length($hdl->rbuf);
+    while(my $orig = length($hdl->rbuf)){
         &{$self->{response_reader}}($self);
         last if $orig == length($hdl->rbuf);
     }
