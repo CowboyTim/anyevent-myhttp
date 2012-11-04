@@ -133,41 +133,17 @@ sub new {
     );
     $self->{hdl} = $hdl;
     $hdl->on_read(sub {
-        my ($hdl) = @_;
-        AE::log debug => "on_read() called";
-        &{$self->{response_reader}}($self);
+        $self->_slurp();
     });
-    my $disconnect = sub {
-        my ($hdl, $fatal, $msg) = @_;
-        AE::log info => "DISCONNECT: left:".length($hdl->rbuf);
-
-        # 'close' Connections that have no Content-Length set will just
-        # disconnect instead of letting the condition be true in
-        # body_reader(), hence we do a consume_next(). *Sigh* HTTP
-        # sucks.
-        if(($self->{response_headers}{Connection} // '') eq 'close'){
-            $self->consume_next();
-        }
-        if(length($hdl->rbuf)){
-            while(1){
-                my $orig = length($hdl->rbuf);
-                &{$self->{response_reader}}($self);
-                last if $orig == length($hdl->rbuf);
-            }
-        }
-        AE::log info => "DISCONNECT (bis): left:".length($hdl->rbuf);
-        $hdl->destroy();
-        ${$self->{cv}}->send();
-    };
     $hdl->on_error(sub {
         my ($hdl, $fatal, $msg) = @_;
         AE::log error => "on_error: $msg";
-        &$disconnect(@_);
+        $self->_disconnect($fatal, $msg);
     });
     $hdl->on_eof(sub {
         my ($hdl, $fatal, $msg) = @_;
         AE::log error => "on_eof: $msg";
-        &$disconnect(@_);
+        $self->_disconnect($fatal, $msg);
     });
     $hdl->on_drain(sub {
         my ($hdl) = @_;
@@ -176,6 +152,35 @@ sub new {
     });
 
     return $self;
+}
+
+sub _disconnect {
+    my ($self, $fatal, $msg) = @_;
+    my $hdl = $self->{hdl};
+    AE::log info => "DISCONNECT: left:".length($hdl->rbuf);
+
+    # 'close' Connections that have no Content-Length set will just
+    # disconnect instead of letting the condition be true in
+    # body_reader(), hence we do a consume_next(). *Sigh* HTTP
+    # sucks.
+    if(($self->{response_headers}{Connection} // '') eq 'close'){
+        $self->consume_next();
+    }
+    $self->_slurp();
+    AE::log info => "DISCONNECT (bis): left:".length($hdl->rbuf);
+    $hdl->destroy();
+    ${$self->{cv}}->send();
+}
+
+sub _slurp {
+    my ($self) = @_;
+    my $hdl = $self->{hdl};
+    AE::log debug => "on_read() called";
+    while(length($hdl->rbuf)){
+        my $orig = length($hdl->rbuf);
+        &{$self->{response_reader}}($self);
+        last if $orig == length($hdl->rbuf);
+    }
 }
 
 sub consume_next {
