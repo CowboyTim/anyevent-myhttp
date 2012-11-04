@@ -28,8 +28,8 @@ my @data_set = (
     #['GET', 'http://www.deredactie.be/', undef, {Connection => 'close', }],
     #['GET', 'https://www.google.be/', undef, {Connection => 'close'}],
     #['GET', 'https://www.google.com/', undef, {Connection => 'close'}],
-    ['GET', 'https://www.google.be/', undef, {}],
-    ['GET', 'https://www.google.be/', undef, {Connection => 'close'}],
+    #['GET', 'https://www.google.com/', undef, {}],
+    ['GET', 'https://www.google.com/', undef, {Connection => 'close'}],
     #['GET', 'https://www.google.be/', undef, {}],
     #['HEAD', 'https://www.google.com/', undef, {'TE' => 'chunked'}],
     #['HEAD', 'https://www.google.be/', undef, {'TE' => 'chunked'}],
@@ -119,7 +119,7 @@ sub new {
     $self->{response_reader} = \&read_response_status;
 
     # make the handle
-    my $uri = $self->{current_request}{uri};
+    my $uri = $self->{request_queue}[0]{uri};
     my $hdl = new AnyEvent::Handle(
         connect => [$uri->host(), $uri->port()],
         ($uri->scheme() eq 'https'?(
@@ -185,7 +185,11 @@ sub _slurp {
 
 sub consume_next {
     my ($self) = @_;
+
+    # reset the response reader
     $self->{response_reader} = \&read_response_status;
+
+    # process the response: re-add REDIRECT's
     my ($code, $msg, $body, $headers) = @{$self}{qw(
         response_status_code
         response_status_message
@@ -193,9 +197,9 @@ sub consume_next {
         response_headers
     )};
     if(defined $code and $code eq '302'){
-        AE::log info => "REDIRECT: $code [$self->{request_method}, $headers->{Location}, undef, '<HEADERS>']";
+        AE::log info => "REDIRECT: $code [$self->{request_queue}[0]{method}, $headers->{Location}, undef, '<HEADERS>']";
         # redirect: make a new request at the start of the queue
-        unshift @{$self->{requests}}, [$self->{request_method}, $headers->{Location}, undef, $self->{request_headers}];
+        unshift @{$self->{requests}}, [$self->{request_queue}[0]{method}, $headers->{Location}, undef, $self->{request_headers}];
     } else {
         &{$self->{consumer}}($code, $msg, $body, $headers);
     }
@@ -224,7 +228,7 @@ sub get_next {
 
 sub send_data {
     my ($self) = @_;
-    my $str = substr($self->{current_request}{data}, 0, 10_000_000, '');
+    my $str = substr($self->{request_queue}[0]{data}, 0, 10_000_000, '');
     unless (length($str)){
         $self->{request_sender} = sub {$self->schedule_next()};
         $self->{hdl}->on_drain(undef);
@@ -248,7 +252,7 @@ sub schedule_next {
 
     # start new
     $self->{request_sender} = \&send_request;
-    push @{$self->{request_queue} //= []}, my $r = $self->{current_request} = {
+    push @{$self->{request_queue} //= []}, my $r = {
         method  => $data->[0],
         data    => $data->[2] // '',
         headers => $data->[3],
@@ -268,9 +272,9 @@ sub send_request {
     my ($self) = @_;
     $self->{request_sender} = \&send_data;
 
-    my %hdr = (%{$self->{headers}}, %{$self->{current_request}{headers}//{}});
+    my %hdr = (%{$self->{headers}}, %{$self->{request_queue}[0]{headers}//{}});
     my $buf = join("\r\n",
-        "$self->{current_request}{method} ".$self->{current_request}{uri}->as_string()." HTTP/1.1",
+        "$self->{request_queue}[0]{method} ".$self->{request_queue}[0]{uri}->as_string()." HTTP/1.1",
         (map {"\u$_: $hdr{$_}"} grep {defined $hdr{$_}} keys %hdr),
     )."\r\n\r\n";
     AE::log debug => "send_request: $buf";
