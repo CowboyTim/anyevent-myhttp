@@ -29,8 +29,8 @@ my @data_set = (
     #['GET', 'https://www.google.be/', undef, {Connection => 'close'}],
     #['GET', 'https://www.google.com/', undef, {Connection => 'close'}],
     #['GET', 'https://www.google.com/', undef, {}],
-    ['GET', 'https://www.google.com/', undef, {}],
-    ['GET', 'https://www.google.com/', undef, {}],
+    ['GET', 'https://www.google.com/', undef, {Connection => 'close'}],
+    #['GET', 'https://www.google.com/', undef, {}],
     #['GET', 'https://www.google.be/', undef, {}],
     #['HEAD', 'https://www.google.com/', undef, {'TE' => 'chunked'}],
     #['HEAD', 'https://www.google.be/', undef, {'TE' => 'chunked'}],
@@ -140,12 +140,12 @@ sub new {
     $hdl->on_error(sub {
         my ($hdl, $fatal, $msg) = @_;
         AE::log error => "on_error: $msg";
-        $self->_disconnect($fatal, $msg);
+        $self->_disconnect($msg, $fatal);
     });
     $hdl->on_eof(sub {
-        my ($hdl, $fatal, $msg) = @_;
-        AE::log error => "on_eof: $msg";
-        $self->_disconnect($fatal, $msg);
+        my ($hdl) = @_;
+        AE::log error => "on_eof";
+        $self->_disconnect();
     });
     $hdl->on_drain(sub {
         my ($hdl) = @_;
@@ -157,7 +157,7 @@ sub new {
 }
 
 sub _disconnect {
-    my ($self, $fatal, $msg) = @_;
+    my ($self, $msg, $fatal) = @_;
     my $hdl = $self->{hdl};
     AE::log info => "DISCONNECT: left:".length($hdl->rbuf);
 
@@ -199,7 +199,12 @@ sub consume_next {
     )};
     if(defined $code and $code eq '302'){
         # redirect: make a new request at the start of the queue
-        unshift @{$self->{requests}}, my $r = [$self->{request_queue}[0]{method}, $headers->{Location}, undef, $self->{request_headers}];
+        unshift @{$self->{requests}}, my $r = [
+            $self->{request_queue}[0]{method},
+            $headers->{Location},
+            undef,
+            $self->{request_queue}[0]{headers}
+        ];
         AE::log info => "REDIRECT: $code [".join(',', map {$_//'<undef>'} @{$r})."]";
     } else {
         &{$self->{consumer}}($code, $msg, $body, $headers);
