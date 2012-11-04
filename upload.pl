@@ -217,13 +217,8 @@ sub get_next {
 
     shift @{$self->{request_queue}};
 
-    # schedule next, make on_drain() produce data again!
+    # schedule next
     $self->schedule_next();
-    $self->{hdl}->on_drain(sub {
-        my ($hdl) = @_;
-        AE::log debug => "on_drain(): called request_sender";
-        &{$self->{request_sender}}($self);
-    });
 }
 
 sub send_data {
@@ -231,7 +226,6 @@ sub send_data {
     my $str = substr($self->{request_queue}[0]{data}, 0, 10_000_000, '');
     unless (length($str)){
         $self->{request_sender} = sub {$self->schedule_next()};
-        $self->{hdl}->on_drain(undef);
         return 0;
     }
     $self->{hdl}->push_write($str);
@@ -244,6 +238,13 @@ sub schedule_next {
     unless(defined $data){
         $self->{hdl}->on_drain(undef);
         return 0;
+    }
+    if($self->{hdl}){
+        $self->{hdl}->on_drain(sub {
+            my ($hdl) = @_;
+            AE::log debug => "on_drain(): called schedule_next";
+            &{$self->{request_sender}}($self);
+        });
     }
 
     my $uri = URI->new($data->[1]);
